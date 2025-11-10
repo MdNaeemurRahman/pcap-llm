@@ -97,7 +97,8 @@ async def health_check():
         "supabase": "unknown",
         "ollama": "unknown",
         "virustotal": "configured" if settings.virustotal_api_key else "not configured",
-        "vector_store": "unknown"
+        "vector_store": "unknown",
+        "tshark": "unknown"
     }
 
     try:
@@ -113,6 +114,16 @@ async def health_check():
 
     vector_health = vector_store.health_check()
     health_status["vector_store"] = vector_health
+
+    try:
+        from .modules.tshark_executor import TSharkExecutor
+        tshark_executor = TSharkExecutor()
+        if tshark_executor.is_available():
+            health_status["tshark"] = "installed"
+        else:
+            health_status["tshark"] = "not installed (required for Option 3)"
+    except Exception as e:
+        health_status["tshark"] = f"error: {str(e)}"
 
     return health_status
 
@@ -156,8 +167,8 @@ async def upload_pcap(file: UploadFile = File(...)):
 
 @app.post("/analyze")
 async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTasks):
-    if request.mode not in ['option1', 'option2']:
-        raise HTTPException(status_code=400, detail="Invalid analysis mode. Choose 'option1' or 'option2'.")
+    if request.mode not in ['option1', 'option2', 'option3']:
+        raise HTTPException(status_code=400, detail="Invalid analysis mode. Choose 'option1', 'option2', or 'option3'.")
 
     try:
         file_hash = request.file_hash
@@ -322,9 +333,14 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                 pipeline.process_option1,
                 file_path, filename, analysis_id
             )
-        else:
+        elif request.mode == 'option2':
             background_tasks.add_task(
                 pipeline.process_option2,
+                file_path, filename, analysis_id
+            )
+        elif request.mode == 'option3':
+            background_tasks.add_task(
+                pipeline.process_option3,
                 file_path, filename, analysis_id
             )
 
@@ -387,8 +403,12 @@ async def chat_query(request: ChatRequest):
 
         if current_mode == 'option1':
             result = chat_handler.handle_option1_query(request.analysis_id, request.query)
-        else:
+        elif current_mode == 'option2':
             result = chat_handler.handle_option2_query(request.analysis_id, request.query)
+        elif current_mode == 'option3':
+            result = chat_handler.handle_option3_query(request.analysis_id, request.query)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown analysis mode: {current_mode}")
 
         if result['status'] == 'error':
             raise HTTPException(status_code=500, detail=result['message'])
@@ -480,8 +500,8 @@ async def get_storage_stats():
 
 @app.post("/reanalyze")
 async def reanalyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTasks):
-    if request.mode not in ['option1', 'option2']:
-        raise HTTPException(status_code=400, detail="Invalid analysis mode. Choose 'option1' or 'option2'.")
+    if request.mode not in ['option1', 'option2', 'option3']:
+        raise HTTPException(status_code=400, detail="Invalid analysis mode. Choose 'option1', 'option2', or 'option3'.")
 
     try:
         file_hash = request.file_hash
@@ -526,9 +546,14 @@ async def reanalyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTa
                 pipeline.process_option1,
                 file_path, filename, new_analysis_id
             )
-        else:
+        elif request.mode == 'option2':
             background_tasks.add_task(
                 pipeline.process_option2,
+                file_path, filename, new_analysis_id
+            )
+        elif request.mode == 'option3':
+            background_tasks.add_task(
+                pipeline.process_option3,
                 file_path, filename, new_analysis_id
             )
 

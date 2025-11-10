@@ -5,6 +5,7 @@ from .ollama_client import OllamaClient
 from .vector_store import VectorStoreManager
 from .supabase_client import SupabaseManager
 from .query_classifier import QueryClassifier
+from .tshark_agent import TSharkAgent
 class ChatHandler:
     def __init__(
         self,
@@ -18,6 +19,7 @@ class ChatHandler:
         self.supabase = supabase_manager
         self.json_outputs_dir = Path(json_outputs_dir)
         self.classifier = QueryClassifier()
+        self.tshark_agent = TSharkAgent(ollama_client)
 
     def handle_option1_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
@@ -206,6 +208,158 @@ class ChatHandler:
             return {
                 'status': 'error',
                 'message': str(e)
+            }
+
+    def handle_option3_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
+        try:
+            analysis = self.supabase.get_analysis_by_id(analysis_id)
+            if not analysis:
+                return {
+                    'status': 'error',
+                    'message': 'Analysis not found'
+                }
+
+            if analysis['status'] != 'ready':
+                return {
+                    'status': 'error',
+                    'message': f"Analysis is not ready. Current status: {analysis['status']}"
+                }
+
+            summary_file = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
+            if not summary_file.exists():
+                return {
+                    'status': 'error',
+                    'message': 'Summary file not found'
+                }
+
+            with open(summary_file, 'r') as f:
+                summary_data = json.load(f)
+
+            pcap_file_path = self.supabase.get_pcap_file_path(analysis_id)
+            if not pcap_file_path:
+                return {
+                    'status': 'error',
+                    'message': 'PCAP file path not found in database. Cannot execute TShark commands.'
+                }
+
+            if not Path(pcap_file_path).exists():
+                return {
+                    'status': 'error',
+                    'message': f'PCAP file not found at stored path: {pcap_file_path}'
+                }
+
+            chat_history = self.supabase.get_chat_history(analysis_id)
+            formatted_history = [
+                {'user': msg['user_query'], 'assistant': msg['llm_response']}
+                for msg in chat_history[-3:]
+            ]
+
+            if not self.tshark_agent.executor.is_available():
+                error_msg = self.tshark_agent.executor.get_installation_instructions()
+                self.supabase.insert_chat_message(
+                    analysis_id=analysis_id,
+                    user_query=query,
+                    llm_response=error_msg,
+                    retrieved_chunks=None
+                )
+                return {
+                    'status': 'error',
+                    'message': error_msg,
+                    'mode': 'option3'
+                }
+
+            print(f"[Option 3] Executing agentic workflow for query: {query}")
+            result = self.tshark_agent.execute_agentic_workflow(
+                user_query=query,
+                pcap_summary=summary_data,
+                pcap_file_path=pcap_file_path
+            )
+
+            if not result['success']:
+                error_response = result.get('error', 'Unknown error occurred')
+                self.supabase.insert_chat_message(
+                    analysis_id=analysis_id,
+                    user_query=query,
+                    llm_response=error_response,
+                    retrieved_chunks=None
+                )
+                return {
+                    'status': 'error',
+                    'message': error_response,
+                    'mode': 'option3'
+                }
+
+            if result.get('suggestion_only'):
+                response = f"**TShark Command Suggestion:**\n\n```bash\n{result['suggested_command']}\n```\n\n**Explanation:**\n{result['explanation']}"
+                self.supabase.insert_chat_message(
+                    analysis_id=analysis_id,
+                    user_query=query,
+                    llm_response=response,
+                    retrieved_chunks=None
+                )
+                return {
+                    'status': 'success',
+                    'response': response,
+                    'mode': 'option3',
+                    'suggestion_only': True
+                }
+
+            commands_executed = result.get('results', [])
+            interpretation = result.get('interpretation', '')
+            reasoning = result.get('llm_reasoning', '')
+
+            response_parts = []
+
+            if reasoning:
+                response_parts.append(f"**Analysis:**\n{reasoning}\n")
+
+            response_parts.append("**Findings:**")
+            response_parts.append(interpretation)
+
+            if commands_executed:
+                response_parts.append("\n**TShark Commands Executed:**")
+                for i, cmd_result in enumerate(commands_executed, 1):
+                    response_parts.append(f"\n{i}. `{cmd_result['command']}`")
+                    if cmd_result.get('purpose'):
+                        response_parts.append(f"   Purpose: {cmd_result['purpose']}")
+
+            final_response = "\n".join(response_parts)
+
+            tshark_metadata = {
+                'commands_executed': [
+                    {
+                        'command': cmd['command'],
+                        'purpose': cmd.get('purpose', ''),
+                        'success': cmd.get('success', False)
+                    }
+                    for cmd in commands_executed
+                ],
+                'reasoning': reasoning
+            }
+
+            self.supabase.insert_chat_message(
+                analysis_id=analysis_id,
+                user_query=query,
+                llm_response=final_response,
+                retrieved_chunks=tshark_metadata
+            )
+
+            return {
+                'status': 'success',
+                'response': final_response,
+                'mode': 'option3',
+                'commands_executed': commands_executed,
+                'reasoning': reasoning
+            }
+
+        except Exception as e:
+            print(f"Error in Option 3 query: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {
+                'status': 'error',
+                'message': f'Error processing query: {str(e)}',
+                'mode': 'option3'
             }
 
     def _format_summary_context(self, summary_data: Dict[str, Any]) -> str:

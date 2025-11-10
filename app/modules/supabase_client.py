@@ -263,6 +263,32 @@ class SupabaseManager:
             print(f"Error getting analysis by hash: {str(e)}")
             return None
 
+    def store_pcap_file_path(self, analysis_id: str, file_path: str) -> bool:
+        try:
+            result = self.client.table('pcap_analyses')\
+                .update({'pcap_file_path': file_path})\
+                .eq('id', analysis_id)\
+                .execute()
+
+            return True
+        except Exception as e:
+            print(f"Error storing PCAP file path: {str(e)}")
+            return False
+
+    def get_pcap_file_path(self, analysis_id: str) -> Optional[str]:
+        try:
+            result = self.client.table('pcap_analyses')\
+                .select('pcap_file_path')\
+                .eq('id', analysis_id)\
+                .execute()
+
+            if result.data and len(result.data) > 0:
+                return result.data[0].get('pcap_file_path')
+            return None
+        except Exception as e:
+            print(f"Error getting PCAP file path: {str(e)}")
+            return None
+
     def get_flagged_entities(self, analysis_id: str) -> List[Dict[str, Any]]:
         try:
             result = self.client.table('virustotal_results')\

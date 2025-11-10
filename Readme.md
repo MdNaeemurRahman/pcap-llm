@@ -5,12 +5,14 @@ An AI-powered network traffic analysis tool that combines PCAP parsing, threat i
 ## Features
 
 - **PCAP File Processing**: Parse network traffic captures (.pcap, .pcapng, .cap files)
-- **Two Analysis Modes**:
+- **Three Analysis Modes**:
   - **Option 1 (Summary Chat)**: Fast analysis with summary data for quick threat assessment
   - **Option 2 (Full Context Chat)**: Deep analysis with RAG for comprehensive packet-level investigation
+  - **Option 3 (Agentic TShark)**: NEW! AI-powered dynamic analysis where LLM decides and executes TShark commands on-demand
 - **VirusTotal Integration**: Automatic threat intelligence lookup for IPs and domains
 - **AI-Powered Chat**: Ask questions about network traffic in natural language using Ollama LLMs
 - **Vector Search**: Efficient similarity search through ChromaDB for Option 2 analysis
+- **Agentic Analysis**: Option 3 uses LLM reasoning to generate and execute custom TShark commands for any query
 - **Persistent Storage**: All analyses, chat history, and results stored in Supabase
 - **Web Interface**: Simple, intuitive UI for uploading files and chatting with the AI analyst
 
@@ -141,16 +143,35 @@ The web interface will be available at: http://localhost:8000
 - Enables deep packet-level queries
 - Higher accuracy for complex questions
 
+#### Option 3: Agentic TShark (NEW!)
+- AI-powered dynamic analysis
+- LLM analyzes your question and decides what TShark commands to run
+- Executes custom TShark filters on-demand based on query
+- Can run multiple commands iteratively to answer complex questions
+- Provides both technical details and natural language interpretation
+- Can suggest TShark commands when asked "how do I query..."
+- Requires TShark installation
+- Best for specific, targeted investigations not covered by summary data
+
 ### Example Queries
 
 Once analysis is complete, you can ask questions like:
 
+**All Modes:**
 - "What are the top protocols in this capture?"
 - "Are there any malicious IPs or domains?"
 - "Show me all HTTP requests to suspicious domains"
 - "What traffic patterns indicate potential threats?"
 - "Summarize the DNS queries"
 - "Which IPs communicated most frequently?"
+
+**Option 3 Specific (Agentic TShark):**
+- "Show me all traffic to IP 192.168.1.100 on port 443"
+- "What DNS queries were made for domain example.com?"
+- "Find all TCP retransmissions in this capture"
+- "Show HTTP requests with status code 404"
+- "What command should I run to find all ICMP packets?"
+- "Display all traffic between 10.0.0.1 and 10.0.0.2"
 
 ## Project Structure
 
@@ -167,7 +188,9 @@ pcap-llm/
 │       ├── vector_store.py     # ChromaDB management
 │       ├── supabase_client.py  # Supabase database operations
 │       ├── pipeline.py         # Analysis pipeline orchestration
-│       └── chat_handler.py     # Chat query handling
+│       ├── chat_handler.py     # Chat query handling
+│       ├── tshark_executor.py  # TShark command execution (Option 3)
+│       └── tshark_agent.py     # Agentic TShark decision engine (Option 3)
 ├── frontend/
 │   └── index.html              # Web interface
 ├── data/
