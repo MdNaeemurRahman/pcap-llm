@@ -50,6 +50,11 @@ class AnalysisPipeline:
             domains = summary['unique_entities']['domains'][:50]
             vt_results = self.vt_client.batch_query_entities(ips, domains)
 
+            vt_output = self.json_outputs_dir / f"{analysis_id}_virustotal.json"
+            with open(vt_output, 'w') as f:
+                json.dump(vt_results, f, indent=2)
+            print(f"Saved VirusTotal results to: {vt_output}")
+
             enriched_summary = self.vt_client.enrich_json_with_vt(summary, vt_results)
 
             enriched_output = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
@@ -100,6 +105,11 @@ class AnalysisPipeline:
             ips = full_data['unique_entities']['ips'][:50]
             domains = full_data['unique_entities']['domains'][:50]
             vt_results = self.vt_client.batch_query_entities(ips, domains)
+
+            vt_output = self.json_outputs_dir / f"{analysis_id}_virustotal.json"
+            with open(vt_output, 'w') as f:
+                json.dump(vt_results, f, indent=2)
+            print(f"Saved VirusTotal results to: {vt_output}")
 
             enriched_full = self.vt_client.enrich_json_with_vt(full_data, vt_results)
 

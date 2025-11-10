@@ -17,21 +17,24 @@ class VirusTotalClient:
     def _make_request(self, endpoint: str) -> Optional[Dict[str, Any]]:
         url = f"{self.base_url}/{endpoint}"
         try:
+            print(f"[VirusTotal] Sending request to: {endpoint}")
             response = requests.get(url, headers=self.headers, timeout=10)
 
             if response.status_code == 200:
+                print(f"[VirusTotal] Response received: OK (200)")
                 return response.json()
             elif response.status_code == 404:
+                print(f"[VirusTotal] Response received: Not Found (404)")
                 return None
             elif response.status_code == 429:
-                print(f"Rate limit hit, waiting {self.rate_limit_delay} seconds...")
+                print(f"[VirusTotal] Rate limit hit, waiting {self.rate_limit_delay} seconds...")
                 time.sleep(self.rate_limit_delay)
                 return self._make_request(endpoint)
             else:
-                print(f"VirusTotal API error: {response.status_code}")
+                print(f"[VirusTotal] API error: {response.status_code}")
                 return None
         except Exception as e:
-            print(f"Error making VirusTotal request: {str(e)}")
+            print(f"[VirusTotal] Request failed: {str(e)}")
             return None
 
     def query_file_hash(self, file_hash: str) -> Optional[Dict[str, Any]]:
@@ -80,20 +83,23 @@ class VirusTotalClient:
     def batch_query_entities(self, ips: List[str], domains: List[str]) -> List[Dict[str, Any]]:
         results = []
 
-        print(f"Querying {len(ips)} IPs and {len(domains)} domains from VirusTotal...")
+        print(f"[VirusTotal] Starting batch query: {len(ips)} IPs and {len(domains)} domains")
 
-        for ip in ips:
+        for idx, ip in enumerate(ips, 1):
+            print(f"[VirusTotal] Querying IP {idx}/{len(ips)}: {ip}")
             result = self.query_ip_address(ip)
             if result:
                 results.append(result)
             time.sleep(self.rate_limit_delay)
 
-        for domain in domains:
+        for idx, domain in enumerate(domains, 1):
+            print(f"[VirusTotal] Querying domain {idx}/{len(domains)}: {domain}")
             result = self.query_domain(domain)
             if result:
                 results.append(result)
             time.sleep(self.rate_limit_delay)
 
+        print(f"[VirusTotal] Batch query complete: {len(results)} results retrieved")
         return results
 
     def enrich_json_with_vt(self, json_data: Dict[str, Any], vt_results: List[Dict[str, Any]]) -> Dict[str, Any]:

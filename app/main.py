@@ -138,7 +138,9 @@ async def upload_pcap(file: UploadFile = File(...)):
                 "message": "PCAP file already analyzed",
                 "analysis_id": existing_analysis['id'],
                 "status": existing_analysis['status'],
-                "existing": True
+                "existing": True,
+                "filename": file.filename,
+                "file_hash": file_hash
             })
 
         return JSONResponse({
@@ -358,6 +360,73 @@ async def get_storage_stats():
         return JSONResponse(stats)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting storage stats: {str(e)}")
+
+
+@app.post("/reanalyze")
+async def reanalyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTasks):
+    if request.mode not in ['option1', 'option2']:
+        raise HTTPException(status_code=400, detail="Invalid analysis mode. Choose 'option1' or 'option2'.")
+
+    try:
+        file_hash = request.file_hash
+
+        existing_analysis = supabase_manager.get_analysis_by_hash(file_hash)
+        if existing_analysis:
+            analysis_id = existing_analysis['id']
+            print(f"Re-analyzing existing analysis: {analysis_id}")
+
+            success = cleanup_manager.delete_specific_analysis(analysis_id)
+            if not success:
+                print(f"Warning: Could not fully clean up previous analysis {analysis_id}")
+
+        pcap_files = list(settings.uploads_dir.glob("*.pcap")) + \
+                     list(settings.uploads_dir.glob("*.pcapng")) + \
+                     list(settings.uploads_dir.glob("*.cap"))
+
+        file_path = None
+        filename = None
+        for pcap_file in pcap_files:
+            from .modules.pcap_parser import PCAPParser
+            parser = PCAPParser(str(pcap_file))
+            if parser.compute_file_hash() == file_hash:
+                file_path = str(pcap_file)
+                filename = pcap_file.name
+                break
+
+        if not file_path:
+            raise HTTPException(status_code=404, detail="PCAP file not found. Please upload the file first.")
+
+        new_analysis_id = supabase_manager.insert_analysis_record(
+            filename=filename,
+            file_hash=file_hash,
+            analysis_mode=request.mode
+        )
+
+        if not new_analysis_id:
+            raise HTTPException(status_code=500, detail="Failed to create analysis record in database")
+
+        if request.mode == 'option1':
+            background_tasks.add_task(
+                pipeline.process_option1,
+                file_path, filename, new_analysis_id
+            )
+        else:
+            background_tasks.add_task(
+                pipeline.process_option2,
+                file_path, filename, new_analysis_id
+            )
+
+        return JSONResponse({
+            "message": "Re-analysis started",
+            "analysis_id": new_analysis_id,
+            "mode": request.mode,
+            "status": "processing"
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting re-analysis: {str(e)}")
 
 
 @app.delete("/analysis/{analysis_id}")

@@ -25,15 +25,18 @@ class OllamaClient:
         }
 
         try:
+            print(f"[Ollama Embedding] Sending request to model: {self.embedding_model}")
             response = requests.post(url, json=payload, timeout=30)
             if response.status_code == 200:
                 result = response.json()
-                return result.get('embedding', [])
+                embedding = result.get('embedding', [])
+                print(f"[Ollama Embedding] Response received: OK (dimensions: {len(embedding)})")
+                return embedding
             else:
-                print(f"Embedding generation failed: {response.status_code}")
+                print(f"[Ollama Embedding] Request failed: {response.status_code}")
                 return None
         except Exception as e:
-            print(f"Error generating embeddings: {str(e)}")
+            print(f"[Ollama Embedding] Error: {str(e)}")
             return None
 
     def batch_embed_chunks(self, chunks: List[str]) -> List[Optional[List[float]]]:
@@ -62,9 +65,11 @@ class OllamaClient:
             payload["system"] = system_prompt
 
         try:
+            print(f"[Ollama LLM] Sending generation request to model: {self.llm_model}")
             response = requests.post(url, json=payload, timeout=120)
 
             if response.status_code == 200:
+                print(f"[Ollama LLM] Response received: OK")
                 if stream:
                     full_response = ""
                     for line in response.iter_lines():
@@ -74,13 +79,18 @@ class OllamaClient:
                                 full_response += chunk_data['response']
                             if chunk_data.get('done', False):
                                 break
+                    print(f"[Ollama LLM] Streaming complete (length: {len(full_response)} chars)")
                     return full_response
                 else:
                     result = response.json()
-                    return result.get('response', '')
+                    llm_response = result.get('response', '')
+                    print(f"[Ollama LLM] Generation complete (length: {len(llm_response)} chars)")
+                    return llm_response
             else:
+                print(f"[Ollama LLM] Request failed: {response.status_code}")
                 return f"Error: LLM generation failed with status {response.status_code}"
         except Exception as e:
+            print(f"[Ollama LLM] Error: {str(e)}")
             return f"Error generating LLM response: {str(e)}"
 
     def format_prompt_for_network_analysis(self, query: str, context: str, chat_history: Optional[List[Dict[str, str]]] = None) -> str:

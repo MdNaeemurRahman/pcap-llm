@@ -82,7 +82,8 @@ class CleanupManager:
             self.json_outputs_dir / f"{analysis_id}_summary.json",
             self.json_outputs_dir / f"{analysis_id}_summary_enriched.json",
             self.json_outputs_dir / f"{analysis_id}_full.json",
-            self.json_outputs_dir / f"{analysis_id}_full_enriched.json"
+            self.json_outputs_dir / f"{analysis_id}_full_enriched.json",
+            self.json_outputs_dir / f"{analysis_id}_virustotal.json"
         ]
 
         for file_path in files_to_delete:

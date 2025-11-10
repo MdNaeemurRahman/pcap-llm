@@ -108,19 +108,25 @@ class VectorStoreManager:
 
             if documents:
                 batch_size = 100
+                total_batches = (len(documents) + batch_size - 1) // batch_size
+                print(f"[Vector Store] Processing {len(documents)} chunks in {total_batches} batches")
+
                 for i in range(0, len(documents), batch_size):
                     batch_docs = documents[i:i + batch_size]
                     batch_metas = metadatas[i:i + batch_size]
                     batch_ids = ids[i:i + batch_size]
+
+                    batch_num = i//batch_size + 1
+                    print(f"[Vector Store] Embedding and storing batch {batch_num}/{total_batches} ({len(batch_docs)} chunks)...")
 
                     collection.add(
                         documents=batch_docs,
                         metadatas=batch_metas,
                         ids=batch_ids
                     )
-                    print(f"Added batch {i//batch_size + 1}: {len(batch_docs)} chunks")
+                    print(f"[Vector Store] Batch {batch_num}/{total_batches} complete")
 
-                print(f"Successfully added {len(documents)} chunks to collection")
+                print(f"[Vector Store] Successfully stored {len(documents)} chunks in collection")
                 return True
             else:
                 print("No valid chunks to add")
@@ -138,6 +144,7 @@ class VectorStoreManager:
         where: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         try:
+            print(f"[Vector Store] Starting similarity search in collection: {collection_name}")
             collection = self.client.get_collection(
                 name=collection_name,
                 embedding_function=self.embedding_function
@@ -152,7 +159,9 @@ class VectorStoreManager:
             if where:
                 query_params["where"] = where
 
+            print(f"[Vector Store] Querying for top {n_results} similar chunks...")
             results = collection.query(**query_params)
+            print(f"[Vector Store] Similarity search complete")
 
             formatted_results = {
                 'chunks': [],

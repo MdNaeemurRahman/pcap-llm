@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PCAP LLM Analyzer</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked@11.1.0/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -191,6 +194,8 @@
             background: #f0f0f0;
             color: #333;
             margin-right: 20%;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
         }
 
         .message strong {
@@ -257,6 +262,121 @@
 
         .hidden {
             display: none;
+        }
+
+        .message.assistant pre {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+
+        .message.assistant code {
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+        }
+
+        .message.assistant pre code {
+            background: transparent;
+            padding: 0;
+        }
+
+        .message.assistant code:not(pre code) {
+            background: #e8e8e8;
+            padding: 2px 6px;
+            border-radius: 3px;
+            color: #c7254e;
+        }
+
+        .message.assistant h1,
+        .message.assistant h2,
+        .message.assistant h3 {
+            margin-top: 15px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .message.assistant ul,
+        .message.assistant ol {
+            margin: 10px 0;
+            padding-left: 25px;
+        }
+
+        .message.assistant li {
+            margin: 5px 0;
+        }
+
+        .message.assistant blockquote {
+            border-left: 4px solid #667eea;
+            padding-left: 15px;
+            margin: 10px 0;
+            color: #666;
+            font-style: italic;
+        }
+
+        .message.assistant table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+        }
+
+        .message.assistant table th,
+        .message.assistant table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        .message.assistant table th {
+            background-color: #667eea;
+            color: white;
+        }
+
+        .message.assistant a {
+            color: #667eea;
+            text-decoration: none;
+        }
+
+        .message.assistant a:hover {
+            text-decoration: underline;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+        }
+
+        .modal-content {
+            background-color: white;
+            margin: 15% auto;
+            padding: 30px;
+            border-radius: 12px;
+            width: 80%;
+            max-width: 500px;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.3);
+        }
+
+        .modal-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+
+        .btn-secondary {
+            background: #999;
+        }
+
+        .btn-secondary:hover {
+            background: #777;
         }
     </style>
 </head>
@@ -330,6 +450,19 @@
         let currentFileHash = null;
         let statusCheckInterval = null;
 
+        marked.setOptions({
+            highlight: function(code, lang) {
+                if (lang && hljs.getLanguage(lang)) {
+                    try {
+                        return hljs.highlight(code, { language: lang }).value;
+                    } catch (err) {}
+                }
+                return hljs.highlightAuto(code).value;
+            },
+            breaks: true,
+            gfm: true
+        });
+
         const uploadZone = document.getElementById('uploadZone');
         const fileInput = document.getElementById('fileInput');
         const uploadStatus = document.getElementById('uploadStatus');
@@ -383,9 +516,9 @@
 
                 if (response.ok) {
                     if (result.existing) {
-                        uploadStatus.innerHTML = '<div class="status-box warning">This PCAP has already been analyzed!</div>';
+                        currentFileHash = result.file_hash;
                         currentAnalysisId = result.analysis_id;
-                        loadExistingAnalysis(result.analysis_id);
+                        showReanalyzeModal();
                     } else {
                         uploadStatus.innerHTML = `<div class="status-box success">File uploaded successfully: ${result.filename}</div>`;
                         currentFileHash = result.file_hash;
@@ -399,6 +532,8 @@
             }
         }
 
+        let reanalyzeMode = false;
+
         analyzeBtn.addEventListener('click', async () => {
             const mode = document.querySelector('input[name="mode"]:checked').value;
 
@@ -411,7 +546,8 @@
             analysisStatus.innerHTML = '<div class="status-box info">Starting analysis... <span class="loader"></span></div>';
 
             try {
-                const response = await fetch('/analyze', {
+                const endpoint = reanalyzeMode ? '/reanalyze' : '/analyze';
+                const response = await fetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -425,6 +561,7 @@
                 if (response.ok) {
                     currentAnalysisId = result.analysis_id;
                     analysisStatus.innerHTML = `<div class="status-box info">Analysis in progress (${mode})... <span class="loader"></span></div>`;
+                    reanalyzeMode = false;
                     startStatusPolling();
                 } else {
                     analysisStatus.innerHTML = `<div class="status-box error">Analysis failed: ${result.detail}</div>`;
@@ -556,10 +693,58 @@
         function addMessage(role, content, isTemp = false) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${role}${isTemp ? ' temp' : ''}`;
-            messageDiv.innerHTML = `<strong>${role === 'user' ? 'You' : 'AI Analyst'}</strong>${content}`;
+
+            if (role === 'assistant' && !isTemp) {
+                const parsedContent = marked.parse(content);
+                messageDiv.innerHTML = `<strong>AI Analyst</strong><div>${parsedContent}</div>`;
+            } else {
+                messageDiv.innerHTML = `<strong>${role === 'user' ? 'You' : 'AI Analyst'}</strong>${content}`;
+            }
+
             chatMessages.appendChild(messageDiv);
             chatMessages.scrollTop = chatMessages.scrollHeight;
         }
+
+        function showReanalyzeModal() {
+            const modal = document.getElementById('reanalyzeModal');
+            modal.style.display = 'block';
+        }
+
+        function closeReanalyzeModal() {
+            const modal = document.getElementById('reanalyzeModal');
+            modal.style.display = 'none';
+        }
+
+        function loadExisting() {
+            closeReanalyzeModal();
+            uploadStatus.innerHTML = '<div class="status-box warning">Loading existing analysis...</div>';
+            loadExistingAnalysis(currentAnalysisId);
+        }
+
+        async function startReanalysis() {
+            closeReanalyzeModal();
+            reanalyzeMode = true;
+            uploadStatus.innerHTML = '<div class="status-box info">Ready for re-analysis. Please select analysis mode and click Start Analysis.</div>';
+            analysisSection.style.display = 'block';
+            statsSection.classList.add('hidden');
+            chatContainer.style.display = 'none';
+        }
     </script>
+
+    <div id="reanalyzeModal" class="modal">
+        <div class="modal-content">
+            <h2 style="margin-bottom: 20px; color: #333;">File Already Analyzed</h2>
+            <p style="color: #666; line-height: 1.6;">This PCAP file has been analyzed before. Would you like to:</p>
+            <ul style="color: #666; margin: 15px 0; padding-left: 20px;">
+                <li><strong>Load existing analysis</strong> - View previous results immediately</li>
+                <li><strong>Re-analyze</strong> - Delete previous data and start fresh analysis</li>
+            </ul>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="closeReanalyzeModal()">Cancel</button>
+                <button class="btn" onclick="loadExisting()">Load Existing</button>
+                <button class="btn" onclick="startReanalysis()">Re-analyze</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
