@@ -117,34 +117,59 @@ class VirusTotalClient:
 
         return parsed
 
-    def batch_query_entities(self, ips: List[str], domains: List[str], file_hashes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def batch_query_entities(
+        self,
+        ips: List[str],
+        domains: List[str],
+        file_hashes: Optional[List[str]] = None,
+        cached_results: Optional[List[Dict[str, Any]]] = None
+    ) -> List[Dict[str, Any]]:
         results = []
 
-        print(f"[VirusTotal] Starting batch query: {len(ips)} IPs, {len(domains)} domains, and {len(file_hashes) if file_hashes else 0} file hashes")
+        cached_entities = set()
+        if cached_results:
+            results.extend(cached_results)
+            for cached in cached_results:
+                cached_entities.add(cached['entity_value'])
+            print(f"[VirusTotal] Found {len(cached_results)} cached results")
 
+        ips_to_query = [ip for ip in ips if ip not in cached_entities]
+        domains_to_query = [domain for domain in domains if domain not in cached_entities]
+        hashes_to_query = []
         if file_hashes:
-            for idx, file_hash in enumerate(file_hashes, 1):
-                print(f"[VirusTotal] Querying file hash {idx}/{len(file_hashes)}: {file_hash[:16]}...")
+            hashes_to_query = [h for h in file_hashes if h not in cached_entities]
+
+        total_to_query = len(ips_to_query) + len(domains_to_query) + len(hashes_to_query)
+        print(f"[VirusTotal] Starting batch query: {len(ips_to_query)} IPs, {len(domains_to_query)} domains, and {len(hashes_to_query)} file hashes")
+        print(f"[VirusTotal] Skipped {len(ips) - len(ips_to_query)} cached IPs and {len(domains) - len(domains_to_query)} cached domains")
+
+        if total_to_query == 0:
+            print(f"[VirusTotal] All entities already cached, skipping API calls")
+            return results
+
+        if hashes_to_query:
+            for idx, file_hash in enumerate(hashes_to_query, 1):
+                print(f"[VirusTotal] Querying file hash {idx}/{len(hashes_to_query)}: {file_hash[:16]}...")
                 result = self.query_file_hash(file_hash)
                 if result:
                     results.append(result)
                 time.sleep(self.rate_limit_delay)
 
-        for idx, ip in enumerate(ips, 1):
-            print(f"[VirusTotal] Querying IP {idx}/{len(ips)}: {ip}")
+        for idx, ip in enumerate(ips_to_query, 1):
+            print(f"[VirusTotal] Querying IP {idx}/{len(ips_to_query)}: {ip}")
             result = self.query_ip_address(ip)
             if result:
                 results.append(result)
             time.sleep(self.rate_limit_delay)
 
-        for idx, domain in enumerate(domains, 1):
-            print(f"[VirusTotal] Querying domain {idx}/{len(domains)}: {domain}")
+        for idx, domain in enumerate(domains_to_query, 1):
+            print(f"[VirusTotal] Querying domain {idx}/{len(domains_to_query)}: {domain}")
             result = self.query_domain(domain)
             if result:
                 results.append(result)
             time.sleep(self.rate_limit_delay)
 
-        print(f"[VirusTotal] Batch query complete: {len(results)} results retrieved")
+        print(f"[VirusTotal] Batch query complete: {len(results)} total results ({len(results) - len(cached_results or [])} new)")
         return results
 
     def enrich_json_with_vt(self, json_data: Dict[str, Any], vt_results: List[Dict[str, Any]]) -> Dict[str, Any]:

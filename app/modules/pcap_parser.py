@@ -377,3 +377,127 @@ class PCAPParser:
     def get_unique_entities(self) -> Tuple[List[str], List[str]]:
         stats = self.extract_basic_stats()
         return stats['unique_ips'], stats['unique_domains']
+
+    def get_prioritized_entities(self, max_ips: int = 5, max_domains: int = 5) -> Dict[str, List[str]]:
+        if not self.capture:
+            self.load_capture()
+
+        ip_scores = {}
+        domain_scores = {}
+        http_hosts = set()
+        http_ips = set()
+        tcp_established = {}
+
+        try:
+            for packet in self.capture:
+                if hasattr(packet, 'ip'):
+                    src_ip = packet.ip.src
+                    dst_ip = packet.ip.dst
+
+                    if src_ip not in ip_scores:
+                        ip_scores[src_ip] = {'packet_count': 0, 'bytes': 0, 'http': False, 'tcp_established': False}
+                    if dst_ip not in ip_scores:
+                        ip_scores[dst_ip] = {'packet_count': 0, 'bytes': 0, 'http': False, 'tcp_established': False}
+
+                    packet_length = int(packet.length) if hasattr(packet, 'length') else 0
+                    ip_scores[src_ip]['packet_count'] += 1
+                    ip_scores[src_ip]['bytes'] += packet_length
+                    ip_scores[dst_ip]['packet_count'] += 1
+                    ip_scores[dst_ip]['bytes'] += packet_length
+
+                elif hasattr(packet, 'ipv6'):
+                    src_ip = packet.ipv6.src
+                    dst_ip = packet.ipv6.dst
+
+                    if src_ip not in ip_scores:
+                        ip_scores[src_ip] = {'packet_count': 0, 'bytes': 0, 'http': False, 'tcp_established': False}
+                    if dst_ip not in ip_scores:
+                        ip_scores[dst_ip] = {'packet_count': 0, 'bytes': 0, 'http': False, 'tcp_established': False}
+
+                    packet_length = int(packet.length) if hasattr(packet, 'length') else 0
+                    ip_scores[src_ip]['packet_count'] += 1
+                    ip_scores[src_ip]['bytes'] += packet_length
+                    ip_scores[dst_ip]['packet_count'] += 1
+                    ip_scores[dst_ip]['bytes'] += packet_length
+
+                if hasattr(packet, 'tcp') and hasattr(packet.tcp, 'flags'):
+                    flags = packet.tcp.flags
+                    if hasattr(packet, 'ip'):
+                        flow_key = f"{packet.ip.src}:{packet.tcp.srcport}->{packet.ip.dst}:{packet.tcp.dstport}"
+                        if 'SYN' in str(flags) and 'ACK' in str(flags):
+                            tcp_established[flow_key] = True
+                            ip_scores[packet.ip.src]['tcp_established'] = True
+                            ip_scores[packet.ip.dst]['tcp_established'] = True
+
+                if hasattr(packet, 'http'):
+                    if hasattr(packet.http, 'host'):
+                        host = packet.http.host
+                        http_hosts.add(host)
+
+                        if host not in domain_scores:
+                            domain_scores[host] = {'request_count': 0, 'bytes': 0, 'http': True}
+                        domain_scores[host]['request_count'] += 1
+
+                        if hasattr(packet, 'ip'):
+                            http_ips.add(packet.ip.dst)
+                            if packet.ip.dst in ip_scores:
+                                ip_scores[packet.ip.dst]['http'] = True
+                            if packet.ip.src in ip_scores:
+                                ip_scores[packet.ip.src]['http'] = True
+
+                if hasattr(packet, 'dns') and hasattr(packet.dns, 'qry_name'):
+                    domain = packet.dns.qry_name
+                    if domain not in domain_scores:
+                        domain_scores[domain] = {'request_count': 0, 'bytes': 0, 'http': False}
+                    domain_scores[domain]['request_count'] += 1
+
+        except Exception as e:
+            print(f"Warning during prioritization: {str(e)}")
+        finally:
+            self.capture.close()
+            self.capture = None
+
+        def calculate_ip_priority(ip: str, stats: Dict) -> float:
+            score = 0.0
+            score += stats['packet_count'] * 1.0
+            score += (stats['bytes'] / 1000) * 2.0
+            if stats['http']:
+                score += 500.0
+            if stats['tcp_established']:
+                score += 200.0
+            return score
+
+        def calculate_domain_priority(domain: str, stats: Dict) -> float:
+            score = 0.0
+            score += stats['request_count'] * 10.0
+            if stats['http']:
+                score += 300.0
+            return score
+
+        ip_priority_list = [
+            (ip, calculate_ip_priority(ip, stats))
+            for ip, stats in ip_scores.items()
+        ]
+        ip_priority_list.sort(key=lambda x: x[1], reverse=True)
+
+        domain_priority_list = [
+            (domain, calculate_domain_priority(domain, stats))
+            for domain, stats in domain_scores.items()
+        ]
+        domain_priority_list.sort(key=lambda x: x[1], reverse=True)
+
+        prioritized_ips = [ip for ip, score in ip_priority_list[:max_ips]]
+        prioritized_domains = [domain for domain, score in domain_priority_list[:max_domains]]
+
+        print(f"[PCAP Parser] Prioritized {len(prioritized_ips)} IPs and {len(prioritized_domains)} domains for VirusTotal queries")
+        print(f"[PCAP Parser] Top IPs: {prioritized_ips}")
+        print(f"[PCAP Parser] Top domains: {prioritized_domains}")
+
+        return {
+            'ips': prioritized_ips,
+            'domains': prioritized_domains,
+            'http_hosts': list(http_hosts),
+            'http_ips': list(http_ips),
+            'total_ips_found': len(ip_scores),
+            'total_domains_found': len(domain_scores)
+        }

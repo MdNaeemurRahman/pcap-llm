@@ -190,9 +190,9 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                 # For option1 -> option2: need to create vector embeddings
                 if current_mode == 'option1' and request.mode == 'option2':
                     print("Switching from Option 1 to Option 2: Creating vector embeddings...")
+                    print("Note: VirusTotal results are cached and will be reused")
                     supabase_manager.update_analysis_status(analysis_id, 'embedding', current_mode='option2')
 
-                    # Find the file
                     pcap_files = list(settings.uploads_dir.glob("*.pcap")) + \
                                  list(settings.uploads_dir.glob("*.pcapng")) + \
                                  list(settings.uploads_dir.glob("*.cap"))
@@ -214,7 +214,7 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                         )
 
                         return JSONResponse({
-                            "message": "Switching to Option 2 mode - creating vector embeddings",
+                            "message": "Switching to Option 2 mode - creating vector embeddings (reusing cached threat intelligence)",
                             "analysis_id": analysis_id,
                             "mode": request.mode,
                             "status": "processing"
@@ -222,11 +222,11 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
 
                 # For option2 -> option1: just update mode, no reprocessing needed
                 elif current_mode == 'option2' and request.mode == 'option1':
-                    print("Switching from Option 2 to Option 1: Using existing summary data")
+                    print("Switching from Option 2 to Option 1: Using existing summary data and cached VirusTotal results")
                     supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option1')
 
                     return JSONResponse({
-                        "message": "Switched to Option 1 mode",
+                        "message": "Switched to Option 1 mode (using cached data)",
                         "analysis_id": analysis_id,
                         "mode": request.mode,
                         "status": "ready"
