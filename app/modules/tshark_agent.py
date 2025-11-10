@@ -1,8 +1,34 @@
 import json
 import re
 from typing import Dict, Any, List, Optional
+from pathlib import Path
 from .ollama_client import OllamaClient
 from .tshark_executor import TSharkExecutor
+
+
+def sanitize_paths(text: str) -> str:
+    """Remove absolute file paths and sensitive directory information from text."""
+    if not text:
+        return text
+
+    # Replace common absolute path patterns
+    text = re.sub(r'/[a-zA-Z0-9_\-./]+/data/uploads/[^\s]+\.pcap(?:ng)?', 'file.pcap', text)
+    text = re.sub(r'C:\\[a-zA-Z0-9_\-\\]+\\[^\s]+\.pcap(?:ng)?', 'file.pcap', text)
+
+    # Replace /usr/bin/tshark and similar with just 'tshark'
+    text = re.sub(r'/usr/bin/tshark', 'tshark', text)
+    text = re.sub(r'/usr/local/bin/tshark', 'tshark', text)
+
+    # Replace absolute paths in general (Unix-style)
+    text = re.sub(r'/[a-zA-Z0-9_\-./]+/[a-zA-Z0-9_\-./]+', '[path]', text)
+
+    # Replace absolute paths (Windows-style)
+    text = re.sub(r'[A-Z]:\\[a-zA-Z0-9_\-\\]+', '[path]', text)
+
+    # Clean up 'tshark -r [path]' to 'tshark -r file.pcap'
+    text = re.sub(r'tshark -r \[path\]', 'tshark -r file.pcap', text)
+
+    return text
 
 
 class TSharkAgent:
@@ -11,6 +37,12 @@ class TSharkAgent:
         self.executor = TSharkExecutor()
         self.max_iterations = 5
         self.command_history = []
+
+    def _is_greeting(self, query: str) -> bool:
+        """Check if the query is a simple greeting."""
+        greetings = ['hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening']
+        query_lower = query.lower().strip()
+        return any(greeting == query_lower or query_lower.startswith(greeting) for greeting in greetings) and len(query.split()) <= 3
 
     def get_tshark_reference_prompt(self) -> str:
         return """You are an expert network security analyst with deep knowledge of TShark and Wireshark display filters.
@@ -23,6 +55,7 @@ tshark -r <pcap_file> [options]
 2. You can only READ pcap files, never write or capture live
 3. Keep commands focused and specific
 4. Use appropriate output format: -T json, -T fields, or default text
+5. NEVER include the actual file path in command_args - the system provides it automatically
 
 **COMMON DISPLAY FILTER SYNTAX:**
 
@@ -107,7 +140,7 @@ Return your response in JSON format with this structure:
   "reasoning": "Brief explanation of what you understand from the query",
   "commands": [
     {
-      "command_args": ["list", "of", "tshark", "arguments"],
+      "command_args": ["list", "of", "tshark", "arguments", "WITHOUT", "-r", "flag"],
       "purpose": "What this command will find",
       "expected_output": "What kind of data this returns"
     }
@@ -115,6 +148,12 @@ Return your response in JSON format with this structure:
   "needs_multiple_steps": false,
   "interpretation_guidance": "How to interpret the results for the user"
 }
+
+**CRITICAL COMMAND GENERATION RULES:**
+- Do NOT include '-r' or the file path in command_args - the system adds it automatically
+- command_args should start with filters like: ["-Y", "ip.addr == 192.168.1.1"]
+- For statistics: ["-q", "-z", "io,stat,0"]
+- For field extraction: ["-T", "fields", "-e", "field_name", "-Y", "filter"]
 
 If the query is asking "what command should I run", provide the command but set a flag:
 {
@@ -190,6 +229,14 @@ Remember: Only use -Y for display filters, return JSON format response."""
     ) -> Dict[str, Any]:
         self.command_history = []
 
+        # Handle simple greetings
+        if self._is_greeting(user_query):
+            return {
+                'success': True,
+                'is_greeting': True,
+                'response': "Hello! I'm your AI security analyst. I can help you investigate this PCAP file by running dynamic analysis on the network traffic. What would you like to know about the captured packets?"
+            }
+
         command_plan_result = self.analyze_query_and_generate_commands(
             user_query, pcap_summary, pcap_file_path
         )
@@ -200,10 +247,11 @@ Remember: Only use -Y for display filters, return JSON format response."""
         command_plan = command_plan_result['command_plan']
 
         if command_plan.get('command_suggestion_only'):
+            suggested_cmd = sanitize_paths(command_plan.get('suggested_command', ''))
             return {
                 'success': True,
                 'suggestion_only': True,
-                'suggested_command': command_plan.get('suggested_command'),
+                'suggested_command': suggested_cmd,
                 'explanation': command_plan.get('explanation')
             }
 
@@ -243,9 +291,20 @@ Remember: Only use -Y for display filters, return JSON format response."""
             user_query, all_results, command_plan.get('interpretation_guidance', '')
         )
 
+        # Sanitize interpretation to remove any leaked paths
+        interpretation = sanitize_paths(interpretation)
+
+        # Sanitize commands in results for potential display
+        sanitized_results = []
+        for result in all_results:
+            sanitized_result = result.copy()
+            if 'command' in sanitized_result:
+                sanitized_result['command'] = sanitize_paths(sanitized_result['command'])
+            sanitized_results.append(sanitized_result)
+
         return {
             'success': True,
-            'results': all_results,
+            'results': sanitized_results,
             'interpretation': interpretation,
             'llm_reasoning': command_plan.get('reasoning', ''),
             'commands_executed': len(all_results)
@@ -321,37 +380,65 @@ Return JSON with:
         guidance: str
     ) -> str:
         results_summary = []
+        has_meaningful_results = False
+
         for i, result in enumerate(results, 1):
             if result['success']:
-                output_preview = result['output'][:500] if isinstance(result['output'], str) else str(result['output'])[:500]
-                results_summary.append(f"Command {i}: {result['purpose']}\nOutput: {output_preview}")
+                output = result['output']
+                output_preview = output[:1000] if isinstance(output, str) else str(output)[:1000]
+
+                # Check if output is meaningful (not empty or just whitespace)
+                if output and str(output).strip():
+                    has_meaningful_results = True
+                    results_summary.append(f"Analysis {i} - {result['purpose']}:\n{output_preview}")
+                else:
+                    results_summary.append(f"Analysis {i} - {result['purpose']}: No matching data found")
             else:
-                results_summary.append(f"Command {i}: {result['purpose']}\nError: {result['output']}")
+                results_summary.append(f"Analysis {i} failed: Unable to retrieve data for {result['purpose']}")
 
         combined_results = '\n\n'.join(results_summary)
 
-        prompt = f"""You are a network security analyst. A user asked: "{user_query}"
+        # If no meaningful results, provide a helpful fallback
+        if not has_meaningful_results:
+            return f"I searched the network traffic for information related to your query, but didn't find any matching data. This could mean:\n\n- The specific element you're looking for isn't present in this capture\n- The query might need to be more specific or use different terms\n- The traffic capture might not contain relevant activity\n\nTry asking about general statistics, overall threats, or rephrasing your question with different specifics."
 
-TShark commands were executed with these results:
+        prompt = f"""You are an expert network security analyst. A user asked: "{user_query}"
+
+You executed dynamic analysis on the PCAP file and gathered the following information:
 
 {combined_results}
 
 Guidance: {guidance}
 
-Provide a clear, natural language explanation that:
-1. Directly answers the user's question
-2. Explains what was found in the PCAP file
-3. Highlights any security-relevant findings
-4. Provides context about what the data means
+**YOUR TASK:**
+Provide a professional, conversational response that:
+1. Directly answers the user's specific question
+2. Explains what was discovered in clear, accessible language
+3. Highlights security-relevant findings and their implications
+4. Provides actionable context and recommendations when appropriate
 
-Be concise but thorough. Focus on insights, not just data."""
+**RESPONSE STYLE:**
+- Be conversational and natural, like talking to a colleague
+- Match your response length to the question complexity (simple question = brief answer)
+- Focus on INSIGHTS and ANALYSIS, not raw data
+- Use specific evidence (IPs, timestamps, packet counts) naturally in your explanation
+- Don't mention "commands", "analysis steps", or technical execution details
+- Present findings as if you directly analyzed the traffic yourself
+
+**EXAMPLE GOOD RESPONSE:**
+"I found several connections involving IP 192.168.1.100. This host communicated with 15 external servers, primarily using HTTPS on port 443. The majority of traffic occurred between 14:30 and 16:45, with a total of 2,847 packets exchanged. The connections appear to be standard web browsing activity with no immediate security concerns."
+
+**EXAMPLE BAD RESPONSE:**
+"Based on the TShark command execution, Analysis 1 shows... Command output indicates... The results from the filter show..."
+
+Provide your analysis now:"""
 
         try:
             interpretation = self.ollama.generate_llm_response(
                 prompt=prompt,
                 stream=False,
-                system_prompt="You are a helpful network security analyst."
+                system_prompt=self.ollama.get_option3_system_prompt()
             )
             return interpretation
         except Exception as e:
-            return f"Commands executed successfully. Raw output shown above. (Interpretation error: {str(e)})"
+            return f"Unable to complete analysis. Please try rephrasing your question or ask about different aspects of the network traffic."

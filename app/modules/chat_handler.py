@@ -289,6 +289,21 @@ class ChatHandler:
                     'mode': 'option3'
                 }
 
+            # Handle greeting responses
+            if result.get('is_greeting'):
+                response = result.get('response')
+                self.supabase.insert_chat_message(
+                    analysis_id=analysis_id,
+                    user_query=query,
+                    llm_response=response,
+                    retrieved_chunks=None
+                )
+                return {
+                    'status': 'success',
+                    'response': response,
+                    'mode': 'option3'
+                }
+
             if result.get('suggestion_only'):
                 response = f"**TShark Command Suggestion:**\n\n```bash\n{result['suggested_command']}\n```\n\n**Explanation:**\n{result['explanation']}"
                 self.supabase.insert_chat_message(
@@ -308,20 +323,24 @@ class ChatHandler:
             interpretation = result.get('interpretation', '')
             reasoning = result.get('llm_reasoning', '')
 
+            # Check if user is explicitly asking for command help
+            is_command_query = any(phrase in query.lower() for phrase in [
+                'what command', 'which command', 'tshark command', 'how do i run', 'show me command'
+            ])
+
             response_parts = []
 
-            if reasoning:
-                response_parts.append(f"**Analysis:**\n{reasoning}\n")
+            # Add findings/interpretation as the main response
+            if interpretation:
+                response_parts.append(interpretation)
 
-            response_parts.append("**Findings:**")
-            response_parts.append(interpretation)
-
-            if commands_executed:
-                response_parts.append("\n**TShark Commands Executed:**")
+            # Only show command details if user explicitly asked for them
+            if is_command_query and commands_executed:
+                response_parts.append("\n\n**Command to run this analysis yourself:**")
                 for i, cmd_result in enumerate(commands_executed, 1):
-                    response_parts.append(f"\n{i}. `{cmd_result['command']}`")
-                    if cmd_result.get('purpose'):
-                        response_parts.append(f"   Purpose: {cmd_result['purpose']}")
+                    if i == 1:  # Only show first command as example
+                        response_parts.append(f"```bash\n{cmd_result['command']}\n```")
+                        break
 
             final_response = "\n".join(response_parts)
 

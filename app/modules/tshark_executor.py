@@ -74,6 +74,14 @@ After installation, restart the application."""
                     'error': f'Dangerous flag "{flag}" is not allowed. Only read operations on PCAP files are permitted.'
                 }
 
+        # Check for duplicate -r flags
+        r_flag_count = sum(1 for part in command_parts if part == '-r')
+        if r_flag_count > 1:
+            return {
+                'valid': False,
+                'error': 'Duplicate -r flags detected. Command should only have one -r flag.'
+            }
+
         if not any('-r' in part for part in command_parts):
             return {
                 'valid': False,
@@ -191,6 +199,34 @@ After installation, restart the application."""
                 'command': ' '.join(command)
             }
 
+    def _clean_command_args(self, args: List[str]) -> List[str]:
+        """Remove duplicate -r flags and file paths from command arguments."""
+        cleaned = []
+        skip_next = False
+
+        for i, arg in enumerate(args):
+            if skip_next:
+                skip_next = False
+                continue
+
+            # Skip -r flags and their associated file paths
+            if arg == '-r':
+                # Skip this flag and the next argument (which is the file path)
+                skip_next = True
+                continue
+
+            # Skip arguments that look like file paths
+            if arg.endswith('.pcap') or arg.endswith('.pcapng') or arg.endswith('.cap'):
+                continue
+
+            # Skip if it's a path to file.pcap or contains file path patterns
+            if 'file.pcap' in arg or '/' in arg or '\\' in arg:
+                continue
+
+            cleaned.append(arg)
+
+        return cleaned
+
     def execute_custom_command(
         self,
         pcap_file_path: str,
@@ -211,7 +247,10 @@ After installation, restart the application."""
                 'error_type': 'file_not_found'
             }
 
-        command = [self.tshark_path, '-r', pcap_file_path] + tshark_args
+        # Clean the arguments to remove duplicate -r flags and file paths
+        cleaned_args = self._clean_command_args(tshark_args)
+
+        command = [self.tshark_path, '-r', pcap_file_path] + cleaned_args
 
         validation = self.validate_command(command)
         if not validation['valid']:
