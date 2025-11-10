@@ -69,7 +69,7 @@ if frontend_dir.exists():
 
 
 class AnalyzeRequest(BaseModel):
-    analysis_id: str
+    file_hash: str
     mode: str
 
 
@@ -158,25 +158,25 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
         raise HTTPException(status_code=400, detail="Invalid analysis mode. Choose 'option1' or 'option2'.")
 
     try:
-        analysis = supabase_manager.get_analysis_by_id(request.analysis_id)
-        if analysis:
-            if analysis['status'] == 'ready':
+        file_hash = request.file_hash
+
+        # Check if analysis already exists for this file hash
+        existing_analysis = supabase_manager.get_analysis_by_hash(file_hash)
+        if existing_analysis:
+            if existing_analysis['status'] == 'ready':
                 return JSONResponse({
                     "message": "Analysis already completed",
-                    "analysis_id": request.analysis_id,
+                    "analysis_id": existing_analysis['id'],
                     "status": "ready"
                 })
-            elif analysis['status'] in ['parsing', 'enriching', 'embedding']:
+            elif existing_analysis['status'] in ['parsing', 'enriching', 'embedding', 'uploaded']:
                 return JSONResponse({
                     "message": "Analysis in progress",
-                    "analysis_id": request.analysis_id,
-                    "status": analysis['status']
+                    "analysis_id": existing_analysis['id'],
+                    "status": existing_analysis['status']
                 })
 
-        file_hash = request.analysis_id.split('_')[0] if '_' in request.analysis_id else None
-        if not file_hash:
-            raise HTTPException(status_code=400, detail="Invalid analysis_id format")
-
+        # Find the PCAP file with matching hash
         pcap_files = list(settings.uploads_dir.glob("*.pcap")) + \
                      list(settings.uploads_dir.glob("*.pcapng")) + \
                      list(settings.uploads_dir.glob("*.cap"))
@@ -192,8 +192,9 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                 break
 
         if not file_path:
-            raise HTTPException(status_code=404, detail="PCAP file not found")
+            raise HTTPException(status_code=404, detail="PCAP file not found. Please upload the file first.")
 
+        # Create new analysis record
         analysis_id = supabase_manager.insert_analysis_record(
             filename=filename,
             file_hash=file_hash,
@@ -201,8 +202,9 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
         )
 
         if not analysis_id:
-            raise HTTPException(status_code=500, detail="Failed to create analysis record")
+            raise HTTPException(status_code=500, detail="Failed to create analysis record in database")
 
+        # Start background processing
         if request.mode == 'option1':
             background_tasks.add_task(
                 pipeline.process_option1,
@@ -221,6 +223,8 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
             "status": "processing"
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error starting analysis: {str(e)}")
 

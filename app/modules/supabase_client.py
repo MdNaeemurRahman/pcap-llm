@@ -2,13 +2,52 @@ from supabase import create_client, Client
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import sys
+import socket
+import time
 
 
 class SupabaseManager:
     def __init__(self, url: str, key: str):
         try:
+            # Test DNS resolution first
+            hostname = url.replace('https://', '').replace('http://', '').split('/')[0]
+            try:
+                socket.gethostbyname(hostname)
+            except socket.gaierror:
+                print("\n" + "="*60)
+                print("ERROR: Cannot resolve Supabase hostname!")
+                print("="*60)
+                print(f"\nHostname: {hostname}")
+                print("\nThis is a DNS resolution issue. Possible causes:")
+                print("  1. No internet connection")
+                print("  2. DNS server is not responding")
+                print("  3. Firewall blocking DNS requests")
+                print("  4. Invalid hostname in SUPABASE_URL")
+                print("\nTroubleshooting steps:")
+                print("  1. Check your internet connection")
+                print("  2. Try: ping", hostname)
+                print("  3. Try: nslookup", hostname)
+                print("  4. Check firewall settings")
+                print("="*60 + "\n")
+                sys.exit(1)
+
+            # Create client with timeout configuration
             self.client: Client = create_client(url, key)
-            self.client.table('pcap_analyses').select('id').limit(1).execute()
+
+            # Test connection with retries
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    self.client.table('pcap_analyses').select('id').limit(1).execute()
+                    print("Successfully connected to Supabase!")
+                    break
+                except Exception as conn_error:
+                    if attempt < max_retries - 1:
+                        print(f"Connection attempt {attempt + 1} failed, retrying...")
+                        time.sleep(2)
+                    else:
+                        raise conn_error
+
         except Exception as e:
             error_msg = str(e)
             print("\n" + "="*60)
@@ -21,7 +60,9 @@ class SupabaseManager:
             print("  2. Invalid API key")
             print("  3. Network connectivity issues")
             print("  4. Project does not exist or is not accessible")
+            print("  5. Firewall blocking HTTPS connections")
             print("\nPlease verify your Supabase credentials in the .env file.")
+            print("If running in a restricted network, check firewall/proxy settings.")
             print("="*60 + "\n")
             sys.exit(1)
 
@@ -135,6 +176,12 @@ class SupabaseManager:
             if result.data and len(result.data) > 0:
                 return result.data[0]
             return None
+        except socket.gaierror as e:
+            print(f"Network error getting analysis by ID: DNS resolution failed - {str(e)}")
+            return None
+        except ConnectionError as e:
+            print(f"Network error getting analysis by ID: Connection failed - {str(e)}")
+            return None
         except Exception as e:
             print(f"Error getting analysis by ID: {str(e)}")
             return None
@@ -145,6 +192,12 @@ class SupabaseManager:
 
             if result.data and len(result.data) > 0:
                 return result.data[0]
+            return None
+        except socket.gaierror as e:
+            print(f"Network error getting analysis by hash: DNS resolution failed - {str(e)}")
+            return None
+        except ConnectionError as e:
+            print(f"Network error getting analysis by hash: Connection failed - {str(e)}")
             return None
         except Exception as e:
             print(f"Error getting analysis by hash: {str(e)}")
