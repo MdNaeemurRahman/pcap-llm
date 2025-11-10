@@ -54,8 +54,10 @@ class ChatHandler:
                 for msg in chat_history[-5:]
             ]
 
+            enriched_query = self._enrich_query_with_context(query, formatted_history)
+
             prompt = self.ollama.format_prompt_for_network_analysis(
-                query=query,
+                query=enriched_query,
                 context=context,
                 chat_history=formatted_history,
                 analysis_mode='option1'
@@ -141,7 +143,14 @@ class ChatHandler:
                     'retrieved_chunks': None
                 }
 
-            expanded_query = self._expand_query(query, query_classification)
+            chat_history = self.supabase.get_chat_history(analysis_id)
+            formatted_history = [
+                {'user': msg['user_query'], 'assistant': msg['llm_response']}
+                for msg in chat_history[-5:]
+            ]
+
+            enriched_query = self._enrich_query_with_context(query, formatted_history)
+            expanded_query = self._expand_query(enriched_query, query_classification)
             print(f"Performing similarity search with query: '{expanded_query}'")
             search_results = self.vector_store.similarity_search(
                 collection_name=f"pcap_{analysis_id}",
@@ -161,14 +170,8 @@ class ChatHandler:
 
             context = self._format_rag_context(filtered_chunks)
 
-            chat_history = self.supabase.get_chat_history(analysis_id)
-            formatted_history = [
-                {'user': msg['user_query'], 'assistant': msg['llm_response']}
-                for msg in chat_history[-5:]
-            ]
-
             prompt = self.ollama.format_prompt_for_option2_analysis(
-                query=query,
+                query=enriched_query,
                 context=context,
                 chat_history=formatted_history
             )
@@ -254,6 +257,8 @@ class ChatHandler:
                 for msg in chat_history[-3:]
             ]
 
+            enriched_query = self._enrich_query_with_context(query, formatted_history)
+
             if not self.tshark_agent.executor.is_available():
                 error_msg = self.tshark_agent.executor.get_installation_instructions()
                 self.supabase.insert_chat_message(
@@ -268,9 +273,9 @@ class ChatHandler:
                     'mode': 'option3'
                 }
 
-            print(f"[Option 3] Executing agentic workflow for query: {query}")
+            print(f"[Option 3] Executing agentic workflow for query: {enriched_query}")
             result = self.tshark_agent.execute_agentic_workflow(
-                user_query=query,
+                user_query=enriched_query,
                 pcap_summary=summary_data,
                 pcap_file_path=pcap_file_path
             )
@@ -728,3 +733,63 @@ Just ask your question naturally, and I'll search through the network traffic an
                 'status': 'error',
                 'message': 'I couldn\'t find specific information to answer your question. Try asking about overall threats, statistics, or rephrasing your query.'
             }
+
+    def _is_short_followup(self, query: str) -> bool:
+        query_lower = query.lower().strip()
+        short_followups = [
+            'yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay',
+            'no', 'nope', 'nah',
+            'continue', 'more', 'tell me more', 'go on', 'keep going',
+            'explain', 'elaborate', 'details', 'how', 'why',
+            'what about', 'and', 'also'
+        ]
+
+        if len(query.split()) <= 3:
+            for phrase in short_followups:
+                if query_lower == phrase or query_lower.startswith(phrase + ' '):
+                    return True
+
+        return False
+
+    def _enrich_query_with_context(self, query: str, chat_history: List[Dict[str, str]]) -> str:
+        if not chat_history or len(chat_history) == 0:
+            return query
+
+        if not self._is_short_followup(query):
+            return query
+
+        last_exchange = chat_history[-1]
+        last_user_query = last_exchange.get('user', '')
+        last_assistant_response = last_exchange.get('assistant', '')
+
+        query_lower = query.lower().strip()
+
+        if query_lower in ['yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay']:
+            enriched = f"""[CONTEXT MEMORY: The user previously asked: "{last_user_query}"
+I responded with information about this topic.
+The user now says "{query}" - they want MORE DETAILS or ELABORATION on what I just discussed.]
+
+User's current request: Provide more detailed information about {last_user_query}"""
+            return enriched
+
+        elif query_lower in ['no', 'nope', 'nah']:
+            enriched = f"""[CONTEXT MEMORY: The user previously asked: "{last_user_query}"
+I provided information about this.
+The user now says "{query}" - they are indicating the information wasn't what they wanted or they disagree.]
+
+User's current response: {query} (in response to the previous discussion)"""
+            return enriched
+
+        elif query_lower in ['continue', 'more', 'tell me more', 'go on', 'keep going', 'details', 'elaborate']:
+            enriched = f"""[CONTEXT MEMORY: The user previously asked: "{last_user_query}"
+I provided initial information.
+The user now says "{query}" - they want additional details or continuation of that analysis.]
+
+User's current request: Continue with more details about {last_user_query}"""
+            return enriched
+
+        else:
+            enriched = f"""[CONTEXT MEMORY: The user previously asked: "{last_user_query}"]
+
+User's current follow-up question: {query}"""
+            return enriched
