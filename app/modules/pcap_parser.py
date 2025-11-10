@@ -70,12 +70,13 @@ class PCAPParser:
             'unique_domains_count': len(stats['unique_domains'])
         }
 
-    def parse_network_flows(self) -> List[Dict[str, Any]]:
+    def parse_network_flows(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         if not self.capture:
             self.load_capture()
 
         flows = []
         flow_counter = Counter()
+        flow_metadata = {}
 
         try:
             for packet in self.capture:
@@ -88,11 +89,15 @@ class PCAPParser:
                 if hasattr(packet, 'ip'):
                     flow_data['src_ip'] = packet.ip.src
                     flow_data['dst_ip'] = packet.ip.dst
-                    flow_key = f"{packet.ip.src}->{packet.ip.dst}"
+                    src_port = getattr(packet.tcp, 'srcport', None) if hasattr(packet, 'tcp') else getattr(packet.udp, 'srcport', None) if hasattr(packet, 'udp') else 'N/A'
+                    dst_port = getattr(packet.tcp, 'dstport', None) if hasattr(packet, 'tcp') else getattr(packet.udp, 'dstport', None) if hasattr(packet, 'udp') else 'N/A'
+                    flow_key = f"{packet.ip.src}:{src_port}->{packet.ip.dst}:{dst_port}"
                 elif hasattr(packet, 'ipv6'):
                     flow_data['src_ip'] = packet.ipv6.src
                     flow_data['dst_ip'] = packet.ipv6.dst
-                    flow_key = f"{packet.ipv6.src}->{packet.ipv6.dst}"
+                    src_port = getattr(packet.tcp, 'srcport', None) if hasattr(packet, 'tcp') else getattr(packet.udp, 'srcport', None) if hasattr(packet, 'udp') else 'N/A'
+                    dst_port = getattr(packet.tcp, 'dstport', None) if hasattr(packet, 'tcp') else getattr(packet.udp, 'dstport', None) if hasattr(packet, 'udp') else 'N/A'
+                    flow_key = f"{packet.ipv6.src}:{src_port}->{packet.ipv6.dst}:{dst_port}"
                 else:
                     flow_data['src_ip'] = 'N/A'
                     flow_data['dst_ip'] = 'N/A'
@@ -110,13 +115,39 @@ class PCAPParser:
 
                 flows.append(flow_data)
                 flow_counter[flow_key] += 1
+
+                if flow_key not in flow_metadata:
+                    flow_metadata[flow_key] = {
+                        'first_seen': flow_data['timestamp'],
+                        'last_seen': flow_data['timestamp'],
+                        'total_bytes': 0,
+                        'packet_count': 0,
+                        'protocol': flow_data['protocol']
+                    }
+
+                flow_metadata[flow_key]['last_seen'] = flow_data['timestamp']
+                flow_metadata[flow_key]['total_bytes'] += int(flow_data['length'])
+                flow_metadata[flow_key]['packet_count'] += 1
+
         except Exception as e:
             print(f"Warning during flow parsing: {str(e)}")
         finally:
             self.capture.close()
             self.capture = None
 
-        return flows, dict(flow_counter.most_common(20))
+        top_flows_with_metadata = {}
+        for flow_key, count in flow_counter.most_common(20):
+            if flow_key in flow_metadata:
+                metadata = flow_metadata[flow_key]
+                top_flows_with_metadata[flow_key] = {
+                    'packet_count': count,
+                    'first_seen': metadata['first_seen'],
+                    'last_seen': metadata['last_seen'],
+                    'total_bytes': metadata['total_bytes'],
+                    'protocol': metadata['protocol']
+                }
+
+        return flows, top_flows_with_metadata
 
     def extract_http_sessions(self) -> List[Dict[str, Any]]:
         if not self.capture:
@@ -137,10 +168,26 @@ class PCAPParser:
                         session['method'] = packet.http.request_method
                     if hasattr(packet.http, 'request_uri'):
                         session['uri'] = packet.http.request_uri
+                        if hasattr(packet.http, 'host'):
+                            session['full_url'] = f"{packet.http.host}{packet.http.request_uri}"
                     if hasattr(packet.http, 'response_code'):
                         session['status_code'] = packet.http.response_code
                     if hasattr(packet.http, 'user_agent'):
                         session['user_agent'] = packet.http.user_agent
+                    if hasattr(packet.http, 'content_type'):
+                        session['content_type'] = packet.http.content_type
+                    if hasattr(packet.http, 'content_length'):
+                        session['content_length'] = packet.http.content_length
+                    if hasattr(packet.http, 'referer'):
+                        session['referer'] = packet.http.referer
+
+                    if hasattr(packet, 'ip'):
+                        session['src_ip'] = packet.ip.src
+                        session['dst_ip'] = packet.ip.dst
+
+                    if hasattr(packet, 'tcp'):
+                        session['src_port'] = packet.tcp.srcport
+                        session['dst_port'] = packet.tcp.dstport
 
                     if session:
                         http_sessions.append(session)
@@ -169,8 +216,25 @@ class PCAPParser:
                         query['query_name'] = packet.dns.qry_name
                     if hasattr(packet.dns, 'qry_type'):
                         query['query_type'] = packet.dns.qry_type
+                    if hasattr(packet.dns, 'qry_class'):
+                        query['query_class'] = packet.dns.qry_class
+
+                    if hasattr(packet.dns, 'flags_response'):
+                        query['is_response'] = packet.dns.flags_response == '1'
+
                     if hasattr(packet.dns, 'a'):
                         query['resolved_ip'] = packet.dns.a
+                    elif hasattr(packet.dns, 'aaaa'):
+                        query['resolved_ipv6'] = packet.dns.aaaa
+                    elif hasattr(packet.dns, 'cname'):
+                        query['cname'] = packet.dns.cname
+
+                    if hasattr(packet.dns, 'resp_name'):
+                        query['response_name'] = packet.dns.resp_name
+
+                    if hasattr(packet, 'ip'):
+                        query['src_ip'] = packet.ip.src
+                        query['dst_ip'] = packet.ip.dst
 
                     if 'query_name' in query:
                         dns_queries.append(query)
@@ -182,11 +246,161 @@ class PCAPParser:
 
         return dns_queries
 
+    def extract_connection_metadata(self) -> List[Dict[str, Any]]:
+        if not self.capture:
+            self.load_capture()
+
+        connections = []
+        connection_tracker = {}
+
+        try:
+            for packet in self.capture:
+                if hasattr(packet, 'tcp'):
+                    timestamp = str(packet.sniff_time) if hasattr(packet, 'sniff_time') else ''
+
+                    if hasattr(packet, 'ip'):
+                        src_ip = packet.ip.src
+                        dst_ip = packet.ip.dst
+                    elif hasattr(packet, 'ipv6'):
+                        src_ip = packet.ipv6.src
+                        dst_ip = packet.ipv6.dst
+                    else:
+                        continue
+
+                    src_port = packet.tcp.srcport
+                    dst_port = packet.tcp.dstport
+                    conn_key = f"{src_ip}:{src_port}->{dst_ip}:{dst_port}"
+
+                    flags = packet.tcp.flags if hasattr(packet.tcp, 'flags') else None
+
+                    if conn_key not in connection_tracker:
+                        connection_tracker[conn_key] = {
+                            'src_ip': src_ip,
+                            'dst_ip': dst_ip,
+                            'src_port': src_port,
+                            'dst_port': dst_port,
+                            'first_seen': timestamp,
+                            'last_seen': timestamp,
+                            'syn_timestamp': None,
+                            'syn_ack_timestamp': None,
+                            'established_timestamp': None,
+                            'fin_timestamp': None,
+                            'rst_timestamp': None,
+                            'flags_observed': set(),
+                            'state': 'UNKNOWN'
+                        }
+
+                    conn = connection_tracker[conn_key]
+                    conn['last_seen'] = timestamp
+
+                    if flags:
+                        conn['flags_observed'].add(str(flags))
+
+                        if 'SYN' in str(flags) and 'ACK' not in str(flags):
+                            conn['syn_timestamp'] = timestamp
+                            conn['state'] = 'SYN_SENT'
+                        elif 'SYN' in str(flags) and 'ACK' in str(flags):
+                            conn['syn_ack_timestamp'] = timestamp
+                            conn['state'] = 'SYN_ACK'
+                        elif 'ACK' in str(flags) and conn['state'] in ['SYN_ACK', 'SYN_SENT']:
+                            conn['established_timestamp'] = timestamp
+                            conn['state'] = 'ESTABLISHED'
+                        elif 'FIN' in str(flags):
+                            conn['fin_timestamp'] = timestamp
+                            conn['state'] = 'FIN_WAIT'
+                        elif 'RST' in str(flags):
+                            conn['rst_timestamp'] = timestamp
+                            conn['state'] = 'RESET'
+
+        except Exception as e:
+            print(f"Warning during connection metadata extraction: {str(e)}")
+        finally:
+            self.capture.close()
+            self.capture = None
+
+        for conn_key, conn_data in connection_tracker.items():
+            conn_data['flags_observed'] = list(conn_data['flags_observed'])
+            connections.append(conn_data)
+
+        connections.sort(key=lambda x: x['first_seen'])
+        return connections[:50]
+
+    def extract_file_transfer_indicators(self) -> List[Dict[str, Any]]:
+        if not self.capture:
+            self.load_capture()
+
+        file_transfers = []
+
+        try:
+            for packet in self.capture:
+                if hasattr(packet, 'http'):
+                    timestamp = str(packet.sniff_time) if hasattr(packet, 'sniff_time') else ''
+
+                    transfer = None
+
+                    if hasattr(packet.http, 'request_method') and packet.http.request_method in ['GET', 'POST', 'PUT']:
+                        transfer = {
+                            'timestamp': timestamp,
+                            'direction': 'download' if packet.http.request_method == 'GET' else 'upload',
+                            'method': packet.http.request_method
+                        }
+
+                        if hasattr(packet.http, 'host'):
+                            transfer['host'] = packet.http.host
+                        if hasattr(packet.http, 'request_uri'):
+                            transfer['uri'] = packet.http.request_uri
+                            if hasattr(packet.http, 'host'):
+                                transfer['url'] = f"{packet.http.host}{packet.http.request_uri}"
+
+                        if hasattr(packet, 'ip'):
+                            transfer['src_ip'] = packet.ip.src
+                            transfer['dst_ip'] = packet.ip.dst
+
+                    if hasattr(packet.http, 'content_type'):
+                        if not transfer:
+                            transfer = {'timestamp': timestamp}
+                        transfer['content_type'] = packet.http.content_type
+                        transfer['file_mime_type'] = packet.http.content_type
+
+                    if hasattr(packet.http, 'content_length'):
+                        if not transfer:
+                            transfer = {'timestamp': timestamp}
+                        try:
+                            transfer['file_size'] = int(packet.http.content_length)
+                        except:
+                            transfer['file_size'] = packet.http.content_length
+
+                    if hasattr(packet.http, 'response_code'):
+                        if transfer:
+                            transfer['response_code'] = packet.http.response_code
+
+                    if hasattr(packet.http, 'content_disposition'):
+                        if not transfer:
+                            transfer = {'timestamp': timestamp}
+                        transfer['content_disposition'] = packet.http.content_disposition
+                        if 'filename' in str(packet.http.content_disposition).lower():
+                            transfer['file_downloaded'] = True
+
+                    if transfer and ('content_type' in transfer or 'file_size' in transfer or 'content_disposition' in transfer):
+                        if 'direction' not in transfer:
+                            transfer['direction'] = 'unknown'
+                        file_transfers.append(transfer)
+
+        except Exception as e:
+            print(f"Warning during file transfer extraction: {str(e)}")
+        finally:
+            self.capture.close()
+            self.capture = None
+
+        return file_transfers[:50]
+
     def generate_summary_json(self, output_path: str) -> Dict[str, Any]:
         stats = self.extract_basic_stats()
         flows, top_flows = self.parse_network_flows()
         http_sessions = self.extract_http_sessions()
         dns_queries = self.extract_dns_queries()
+        connections = self.extract_connection_metadata()
+        file_transfers = self.extract_file_transfer_indicators()
 
         summary = {
             'file_info': {
@@ -202,6 +416,8 @@ class PCAPParser:
             'top_flows': top_flows,
             'http_sessions': http_sessions[:50],
             'dns_queries': dns_queries[:50],
+            'tcp_connections': connections,
+            'file_transfers': file_transfers,
             'unique_entities': {
                 'ips': stats['unique_ips'][:100],
                 'domains': stats['unique_domains'][:100]

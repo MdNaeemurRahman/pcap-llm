@@ -126,14 +126,13 @@ class ChatHandler:
                 for msg in chat_history[-5:]
             ]
 
-            prompt = self.ollama.format_prompt_for_network_analysis(
+            prompt = self.ollama.format_prompt_for_option2_analysis(
                 query=query,
                 context=context,
-                chat_history=formatted_history,
-                analysis_mode='option2'
+                chat_history=formatted_history
             )
 
-            system_prompt = self.ollama.get_system_prompt()
+            system_prompt = self.ollama.get_option2_system_prompt()
             response = self.ollama.generate_llm_response(
                 prompt=prompt,
                 stream=False,
@@ -245,33 +244,109 @@ class ChatHandler:
                 query_name = query.get('query_name', 'N/A')
                 context_parts.append(f"Query: {query_name}")
 
-        context_parts.append("\n=== TOP NETWORK FLOWS ===")
-        for flow, count in list(summary_data.get('top_flows', {}).items())[:10]:
-            context_parts.append(f"{flow}: {count} packets")
+        context_parts.append("\n=== TOP NETWORK FLOWS (with Metadata) ===")
+        for flow, metadata in list(summary_data.get('top_flows', {}).items())[:10]:
+            if isinstance(metadata, dict):
+                flow_info = f"{flow}: {metadata.get('packet_count', 0)} packets, {metadata.get('total_bytes', 0)} bytes"
+                if metadata.get('first_seen') and metadata.get('last_seen'):
+                    flow_info += f", Duration: {metadata['first_seen']} to {metadata['last_seen']}"
+                context_parts.append(flow_info)
+            else:
+                context_parts.append(f"{flow}: {metadata} packets")
+
+        if summary_data.get('tcp_connections'):
+            context_parts.append("\n=== TCP CONNECTION STATES (Sample) ===")
+            for conn in summary_data['tcp_connections'][:10]:
+                conn_info = f"{conn.get('src_ip', 'N/A')}:{conn.get('src_port', 'N/A')} -> {conn.get('dst_ip', 'N/A')}:{conn.get('dst_port', 'N/A')}"
+                conn_info += f" | State: {conn.get('state', 'UNKNOWN')}"
+                if conn.get('established_timestamp'):
+                    conn_info += f" | Established: {conn['established_timestamp']}"
+                if conn.get('first_seen'):
+                    conn_info += f" | First: {conn['first_seen']}"
+                context_parts.append(conn_info)
+
+        if summary_data.get('file_transfers'):
+            context_parts.append("\n=== FILE TRANSFER INDICATORS ===")
+            for transfer in summary_data['file_transfers'][:10]:
+                transfer_info = f"[{transfer.get('timestamp', 'N/A')}] {transfer.get('direction', 'unknown').upper()}"
+                if transfer.get('url'):
+                    transfer_info += f" from {transfer['url']}"
+                elif transfer.get('host'):
+                    transfer_info += f" from {transfer['host']}"
+                if transfer.get('file_size'):
+                    transfer_info += f" | Size: {transfer['file_size']} bytes"
+                if transfer.get('content_type'):
+                    transfer_info += f" | Type: {transfer['content_type']}"
+                context_parts.append(transfer_info)
 
         return "\n".join(context_parts)
 
     def _format_rag_context(self, chunks: List[Dict[str, Any]]) -> str:
         context_parts = []
 
-        context_parts.append("=== RELEVANT NETWORK TRAFFIC DATA ===")
-        context_parts.append(f"Retrieved {len(chunks)} relevant segments from the network capture:\n")
+        context_parts.append("=== RETRIEVED RELEVANT DATA ===")
+        context_parts.append(f"Retrieved {len(chunks)} relevant segments through similarity search.")
+        context_parts.append("Each segment below is labeled with its type and contains specific metadata.\n")
 
         for i, chunk in enumerate(chunks, 1):
-            packet_start = chunk['metadata'].get('packet_range_start', -1)
-            packet_end = chunk['metadata'].get('packet_range_end', -1)
+            metadata = chunk.get('metadata', {})
+            packet_start = metadata.get('packet_range_start', -1)
+            packet_end = metadata.get('packet_range_end', -1)
+            chunk_type = metadata.get('chunk_type', 'unknown')
 
-            if packet_start == -1 or packet_end == -1:
-                context_parts.append("--- VIRUSTOTAL THREAT INTELLIGENCE SEGMENT ---")
-                context_parts.append("NOTE: This segment contains VirusTotal threat intelligence data.")
-                context_parts.append("IPs, domains, and file hashes in this segment were analyzed by VirusTotal")
-                context_parts.append("and flagged by multiple security vendors as malicious or suspicious.")
+            if chunk_type == 'threat_intelligence' or packet_start == -1 or packet_end == -1:
+                context_parts.append("=" * 70)
+                context_parts.append("SEGMENT TYPE: VIRUSTOTAL THREAT INTELLIGENCE")
+                context_parts.append("=" * 70)
+                context_parts.append("SOURCE: Pre-analyzed security threat data from VirusTotal database")
+                context_parts.append("CONTENT: Confirmed malicious/suspicious entities flagged by security vendors")
+
+                threat_count = metadata.get('threat_count', 0)
+                if threat_count > 0:
+                    context_parts.append(f"THREATS IN SEGMENT: {threat_count} flagged entities")
+
+                flagged_ips = metadata.get('ip_addresses', [])
+                flagged_domains = metadata.get('domains', [])
+                if flagged_ips:
+                    context_parts.append(f"FLAGGED IPs: {', '.join(flagged_ips[:5])}")
+                if flagged_domains:
+                    context_parts.append(f"FLAGGED DOMAINS: {', '.join(flagged_domains[:5])}")
+
                 context_parts.append("")
-            else:
-                context_parts.append(f"--- Network Traffic Segment: Packets {packet_start}-{packet_end} ---")
+                context_parts.append(chunk['text'])
+                context_parts.append("")
 
-            context_parts.append(chunk['text'])
-            context_parts.append("")
+            else:
+                context_parts.append("=" * 70)
+                context_parts.append(f"SEGMENT TYPE: NETWORK TRAFFIC DATA")
+                context_parts.append("=" * 70)
+                context_parts.append(f"SOURCE: PCAP packet analysis")
+                context_parts.append(f"PACKET RANGE: {packet_start} to {packet_end} ({packet_end - packet_start} packets)")
+
+                timestamp_range = metadata.get('timestamp_range', {})
+                if timestamp_range.get('start') and timestamp_range.get('end'):
+                    context_parts.append(f"TIME RANGE: {timestamp_range['start']} to {timestamp_range['end']}")
+
+                protocols = metadata.get('protocols', [])
+                if protocols:
+                    context_parts.append(f"PROTOCOLS: {', '.join(protocols)}")
+
+                ips = metadata.get('ip_addresses', [])
+                if ips:
+                    context_parts.append(f"IPs INVOLVED: {', '.join(ips[:8])}")
+
+                domains = metadata.get('domains', [])
+                if domains:
+                    context_parts.append(f"DOMAINS ACCESSED: {', '.join(domains[:8])}")
+
+                has_threats = metadata.get('has_threats', False)
+                threat_count = metadata.get('threat_count', 0)
+                if has_threats and threat_count > 0:
+                    context_parts.append(f"⚠️  CONTAINS {threat_count} THREAT(S) - See VirusTotal data for details")
+
+                context_parts.append("")
+                context_parts.append(chunk['text'])
+                context_parts.append("")
 
         return "\n".join(context_parts)
 

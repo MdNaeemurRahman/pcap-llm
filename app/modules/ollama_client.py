@@ -120,6 +120,49 @@ class OllamaClient:
 
         return "\n".join(prompt_parts)
 
+    def format_prompt_for_option2_analysis(self, query: str, context: str, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
+        prompt_parts = []
+
+        if chat_history and len(chat_history) > 0:
+            prompt_parts.append("=== CONVERSATION HISTORY ===")
+            for msg in chat_history[-3:]:
+                prompt_parts.append(f"User: {msg['user']}")
+                if len(msg['assistant']) > 200:
+                    prompt_parts.append(f"Assistant: {msg['assistant'][:200]}...")
+                else:
+                    prompt_parts.append(f"Assistant: {msg['assistant']}")
+            prompt_parts.append("")
+
+        prompt_parts.append("=== DUAL-SOURCE CONTEXT FOR ANALYSIS ===")
+        prompt_parts.append("You have access to TWO distinct types of information retrieved through similarity search:")
+        prompt_parts.append("")
+        prompt_parts.append("1. NETWORK TRAFFIC SEGMENTS: Detailed packet-level data from the PCAP file")
+        prompt_parts.append("   - Contains timestamps, IPs, domains, protocols, HTTP requests, DNS queries")
+        prompt_parts.append("   - Use this to understand WHAT happened in the network traffic")
+        prompt_parts.append("   - Reference using: 'In packets X-Y', 'At timestamp Z', 'Traffic between IP A and B'")
+        prompt_parts.append("")
+        prompt_parts.append("2. VIRUSTOTAL THREAT INTELLIGENCE: Pre-analyzed security threat data")
+        prompt_parts.append("   - Contains confirmed malicious/suspicious entities flagged by security vendors")
+        prompt_parts.append("   - Use this to understand SECURITY IMPLICATIONS of network entities")
+        prompt_parts.append("   - Reference using: 'According to VirusTotal', 'Threat intelligence shows', 'Security vendors flagged'")
+        prompt_parts.append("")
+        prompt_parts.append("=== RETRIEVED CONTEXT ===")
+        prompt_parts.append(context)
+        prompt_parts.append("")
+        prompt_parts.append("=== USER QUESTION ===")
+        prompt_parts.append(query)
+        prompt_parts.append("")
+        prompt_parts.append("=== ANALYSIS INSTRUCTIONS ===")
+        prompt_parts.append("- CORRELATE findings between network traffic and threat intelligence")
+        prompt_parts.append("- CITE specific evidence: packet ranges, timestamps, IPs, domains")
+        prompt_parts.append("- When discussing threats, CLEARLY indicate they come from VirusTotal analysis")
+        prompt_parts.append("- MAINTAIN conversational continuity - remember what was discussed previously")
+        prompt_parts.append("- ANSWER the specific question asked - don't just summarize all available data")
+        prompt_parts.append("- If the user asks a follow-up, build on the previous conversation")
+        prompt_parts.append("- Use NATURAL language - avoid phrases like 'Chunk 1' or 'from the chunks'")
+
+        return "\n".join(prompt_parts)
+
     def get_system_prompt(self) -> str:
         return """You are an expert network security analyst assistant specializing in PCAP analysis and threat detection. You have access to network traffic data and threat intelligence to help users understand security postures and investigate potential threats.
 
@@ -161,6 +204,50 @@ Security Focus:
 - Recommend specific mitigation strategies when appropriate
 
 Remember: You are a professional security analyst having a conversation with a colleague. Be knowledgeable, precise, helpful, and conversational. Let your expertise guide your responses naturally without being constrained by rigid response patterns."""
+
+    def get_option2_system_prompt(self) -> str:
+        return """You are an expert network security analyst assistant with deep expertise in PCAP analysis and threat intelligence correlation. You work with a specialized RAG (Retrieval-Augmented Generation) system that provides you with two distinct types of context.
+
+Your Context Sources:
+1. NETWORK TRAFFIC DATA: Packet-level details from PCAP files including timestamps, IPs, ports, protocols, HTTP requests, DNS queries, and connection states
+2. VIRUSTOTAL THREAT INTELLIGENCE: Pre-analyzed security data showing which entities (IPs, domains, file hashes) have been flagged by security vendors as malicious or suspicious
+
+Core Responsibilities:
+- Provide INTERACTIVE, CONVERSATIONAL responses that directly answer user questions
+- CORRELATE information between network traffic and threat intelligence
+- MAINTAIN context across multiple questions in a conversation thread
+- CITE specific evidence from both data sources naturally and precisely
+- Explain WHEN events occurred using timestamps, WHAT happened in the traffic, and WHY it's significant from a security perspective
+
+Conversational Approach:
+- Treat each query as part of an ongoing conversation with a security colleague
+- Remember what was discussed previously and build on that context
+- If a user asks a follow-up question, reference and expand on earlier findings
+- Answer the SPECIFIC question asked - don't summarize everything you see
+- Be concise when the question is simple, detailed when investigating complex threats
+- Handle casual greetings naturally while staying focused on security analysis
+
+Evidence Citation Standards:
+- For network traffic: "In packets 150-250...", "At timestamp 2024-11-10 14:23:15...", "Traffic between 192.168.1.100 and 10.0.0.50..."
+- For threat intelligence: "According to VirusTotal analysis...", "Security vendors flagged...", "Threat intelligence confirms..."
+- NEVER use generic references like "Chunk 1", "the chunks", or "retrieved segments"
+- When correlating, connect timeline evidence: "The connection to 185.220.100.X was established at 14:23:15, and VirusTotal confirms this IP is flagged by 23 security vendors as a known C2 server"
+
+Analysis Methodology:
+- Prioritize ANSWERING the user's question over providing comprehensive summaries
+- Use your security expertise to identify patterns that indicate threats
+- Explain the significance and potential impact of findings
+- Distinguish between confirmed threats (VirusTotal flagged) and suspicious patterns
+- Provide actionable insights and recommend next investigation steps when appropriate
+- If you don't have relevant information to answer a question, say so clearly
+
+Temporal Analysis Excellence:
+- Always note WHEN events occurred if timestamps are available
+- Identify sequences of events and their security implications
+- Correlate timing of connections with threat intelligence findings
+- Help users understand attack timelines and progression
+
+Remember: You're an interactive security analyst having a real conversation. Be natural, be precise, cite your evidence, maintain context, and answer what's asked. Your goal is to help the user understand their network traffic and identify security issues through intelligent analysis of both packet data and threat intelligence."""
 
     def handle_streaming_response(self, prompt: str, system_prompt: Optional[str] = None):
         url = f"{self.base_url}/api/generate"
