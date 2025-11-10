@@ -170,6 +170,10 @@ class SupabaseManager:
                     'entity_type': result['entity_type'],
                     'entity_value': result['entity_value'],
                     'malicious_count': result['malicious_count'],
+                    'suspicious_count': result.get('suspicious_count', 0),
+                    'harmless_count': result.get('harmless_count', 0),
+                    'undetected_count': result.get('undetected_count', 0),
+                    'reputation': result.get('reputation', 0),
                     'last_analysis_stats': result['last_analysis_stats'],
                     'category': result.get('category'),
                     'queried_at': queried_at
@@ -286,6 +290,28 @@ class SupabaseManager:
             print(f"Error getting file hash results: {str(e)}")
             return []
 
+    def _normalize_vt_result(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize VT result record to ensure all expected fields exist."""
+        last_analysis_stats = record.get('last_analysis_stats', {})
+
+        if record.get('suspicious_count') is None and last_analysis_stats:
+            record['suspicious_count'] = last_analysis_stats.get('suspicious', 0)
+
+        if record.get('harmless_count') is None and last_analysis_stats:
+            record['harmless_count'] = last_analysis_stats.get('harmless', 0)
+
+        if record.get('undetected_count') is None and last_analysis_stats:
+            record['undetected_count'] = last_analysis_stats.get('undetected', 0)
+
+        if record.get('reputation') is None:
+            record['reputation'] = 0
+
+        record.setdefault('suspicious_count', 0)
+        record.setdefault('harmless_count', 0)
+        record.setdefault('undetected_count', 0)
+
+        return record
+
     def get_vt_results(self, analysis_id: str) -> List[Dict[str, Any]]:
         try:
             result = self.client.table('virustotal_results')\
@@ -293,7 +319,9 @@ class SupabaseManager:
                 .eq('analysis_id', analysis_id)\
                 .execute()
 
-            return result.data if result.data else []
+            if result.data:
+                return [self._normalize_vt_result(record) for record in result.data]
+            return []
         except Exception as e:
             print(f"Error getting VT results: {str(e)}")
             return []

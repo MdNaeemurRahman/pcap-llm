@@ -206,8 +206,10 @@ class ChatHandler:
             if file_threats:
                 context_parts.append("\n=== FILE HASH ANALYSIS ===")
                 for entity in file_threats:
-                    threat_info = f"File Hash: {entity['entity_value'][:16]}... "
-                    threat_info += f"(Malicious: {entity['malicious_count']}/{entity.get('harmless_count', 0)+entity['malicious_count']} engines)"
+                    threat_info = f"File Hash: {entity.get('entity_value', 'Unknown')[:16]}... "
+                    malicious_count = entity.get('malicious_count', 0)
+                    harmless_count = entity.get('harmless_count', 0)
+                    threat_info += f"(Malicious: {malicious_count}/{harmless_count + malicious_count} engines)"
                     if entity.get('threat_label'):
                         threat_info += f" - Threat: {entity['threat_label']}"
                     context_parts.append(threat_info)
@@ -215,14 +217,18 @@ class ChatHandler:
                     if entity.get('detection_engines'):
                         context_parts.append("  Top Detections:")
                         for detection in entity['detection_engines'][:5]:
-                            context_parts.append(f"    - {detection['engine']}: {detection['result']}")
+                            context_parts.append(f"    - {detection.get('engine', 'Unknown')}: {detection.get('result', 'Unknown')}")
 
             if ip_threats or domain_threats:
                 context_parts.append("\n=== NETWORK THREATS ===")
                 for entity in (ip_threats + domain_threats)[:10]:
+                    entity_type = entity.get('entity_type', 'unknown').upper()
+                    entity_value = entity.get('entity_value', 'Unknown')
+                    malicious_count = entity.get('malicious_count', 0)
+                    suspicious_count = entity.get('suspicious_count', 0)
                     context_parts.append(
-                        f"{entity['entity_type'].upper()}: {entity['entity_value']} "
-                        f"(Malicious: {entity['malicious_count']}, Suspicious: {entity['suspicious_count']})"
+                        f"{entity_type}: {entity_value} "
+                        f"(Malicious: {malicious_count}, Suspicious: {suspicious_count})"
                     )
 
         if summary_data.get('http_sessions'):
