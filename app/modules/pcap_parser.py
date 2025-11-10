@@ -221,33 +221,47 @@ class PCAPParser:
         stats = {
             'unique_ips': set(),
             'unique_domains': set(),
-            'protocols': Counter()
+            'protocols': Counter(),
+            'file_hashes': set()
         }
 
         try:
             packet_count = 0
+            print(f"[PCAP Parser] Starting full JSON conversion...")
             for packet in self.capture:
                 packet_count += 1
+                if packet_count % 100 == 0:
+                    print(f"[PCAP Parser] Processed {packet_count} packets...")
+
                 packet_data = {
                     'packet_number': packet_count,
                     'timestamp': str(packet.sniff_time) if hasattr(packet, 'sniff_time') else '',
                     'length': packet.length if hasattr(packet, 'length') else 0,
-                    'protocol': packet.highest_layer if hasattr(packet, 'highest_layer') else 'UNKNOWN'
+                    'protocol': packet.highest_layer if hasattr(packet, 'highest_layer') else 'UNKNOWN',
+                    'layers': []
                 }
+
+                for layer in packet.layers:
+                    packet_data['layers'].append(layer.layer_name)
 
                 stats['protocols'][packet_data['protocol']] += 1
 
                 if hasattr(packet, 'ip'):
                     packet_data['ip'] = {
                         'src': packet.ip.src,
-                        'dst': packet.ip.dst
+                        'dst': packet.ip.dst,
+                        'version': packet.ip.version if hasattr(packet.ip, 'version') else None,
+                        'ttl': packet.ip.ttl if hasattr(packet.ip, 'ttl') else None,
+                        'protocol': packet.ip.proto if hasattr(packet.ip, 'proto') else None
                     }
                     stats['unique_ips'].add(packet.ip.src)
                     stats['unique_ips'].add(packet.ip.dst)
                 elif hasattr(packet, 'ipv6'):
                     packet_data['ipv6'] = {
                         'src': packet.ipv6.src,
-                        'dst': packet.ipv6.dst
+                        'dst': packet.ipv6.dst,
+                        'version': '6',
+                        'hop_limit': packet.ipv6.hlim if hasattr(packet.ipv6, 'hlim') else None
                     }
                     stats['unique_ips'].add(packet.ipv6.src)
                     stats['unique_ips'].add(packet.ipv6.dst)
@@ -255,19 +269,36 @@ class PCAPParser:
                 if hasattr(packet, 'tcp'):
                     packet_data['tcp'] = {
                         'src_port': packet.tcp.srcport,
-                        'dst_port': packet.tcp.dstport
+                        'dst_port': packet.tcp.dstport,
+                        'flags': packet.tcp.flags if hasattr(packet.tcp, 'flags') else None,
+                        'seq': packet.tcp.seq if hasattr(packet.tcp, 'seq') else None,
+                        'ack': packet.tcp.ack if hasattr(packet.tcp, 'ack') else None,
+                        'window_size': packet.tcp.window_size if hasattr(packet.tcp, 'window_size') else None
                     }
                 elif hasattr(packet, 'udp'):
                     packet_data['udp'] = {
                         'src_port': packet.udp.srcport,
-                        'dst_port': packet.udp.dstport
+                        'dst_port': packet.udp.dstport,
+                        'length': packet.udp.length if hasattr(packet.udp, 'length') else None
                     }
 
-                if hasattr(packet, 'dns') and hasattr(packet.dns, 'qry_name'):
-                    packet_data['dns'] = {
-                        'query_name': packet.dns.qry_name
+                if hasattr(packet, 'icmp'):
+                    packet_data['icmp'] = {
+                        'type': packet.icmp.type if hasattr(packet.icmp, 'type') else None,
+                        'code': packet.icmp.code if hasattr(packet.icmp, 'code') else None
                     }
-                    stats['unique_domains'].add(packet.dns.qry_name)
+
+                if hasattr(packet, 'dns'):
+                    packet_data['dns'] = {}
+                    if hasattr(packet.dns, 'qry_name'):
+                        packet_data['dns']['query_name'] = packet.dns.qry_name
+                        stats['unique_domains'].add(packet.dns.qry_name)
+                    if hasattr(packet.dns, 'qry_type'):
+                        packet_data['dns']['query_type'] = packet.dns.qry_type
+                    if hasattr(packet.dns, 'flags'):
+                        packet_data['dns']['flags'] = packet.dns.flags
+                    if hasattr(packet.dns, 'a'):
+                        packet_data['dns']['answer'] = packet.dns.a
 
                 if hasattr(packet, 'http'):
                     packet_data['http'] = {}
@@ -278,6 +309,30 @@ class PCAPParser:
                         packet_data['http']['method'] = packet.http.request_method
                     if hasattr(packet.http, 'request_uri'):
                         packet_data['http']['uri'] = packet.http.request_uri
+                    if hasattr(packet.http, 'response_code'):
+                        packet_data['http']['status_code'] = packet.http.response_code
+                    if hasattr(packet.http, 'user_agent'):
+                        packet_data['http']['user_agent'] = packet.http.user_agent
+                    if hasattr(packet.http, 'content_type'):
+                        packet_data['http']['content_type'] = packet.http.content_type
+
+                if hasattr(packet, 'tls'):
+                    packet_data['tls'] = {}
+                    if hasattr(packet.tls, 'handshake_type'):
+                        packet_data['tls']['handshake_type'] = packet.tls.handshake_type
+                    if hasattr(packet.tls, 'record_version'):
+                        packet_data['tls']['version'] = packet.tls.record_version
+
+                if hasattr(packet, 'data'):
+                    try:
+                        data_layer = packet.data
+                        if hasattr(data_layer, 'data'):
+                            data_hex = data_layer.data
+                            if len(data_hex) > 0:
+                                packet_data['has_payload'] = True
+                                packet_data['payload_length'] = len(data_hex) // 2
+                    except:
+                        pass
 
                 all_packets.append(packet_data)
         except Exception as e:
@@ -286,16 +341,22 @@ class PCAPParser:
             self.capture.close()
             self.capture = None
 
+        file_hash = self.compute_file_hash()
+        print(f"[PCAP Parser] Completed processing {len(all_packets)} packets")
+        print(f"[PCAP Parser] PCAP file hash: {file_hash}")
+
         full_data = {
             'file_info': {
                 'filename': Path(self.file_path).name,
-                'file_hash': self.compute_file_hash()
+                'file_hash': file_hash,
+                'total_size_bytes': Path(self.file_path).stat().st_size
             },
             'statistics': {
                 'total_packets': len(all_packets),
                 'top_protocols': dict(stats['protocols'].most_common(10)),
                 'unique_ips_count': len(stats['unique_ips']),
-                'unique_domains_count': len(stats['unique_domains'])
+                'unique_domains_count': len(stats['unique_domains']),
+                'conversion_complete': True
             },
             'unique_entities': {
                 'ips': list(stats['unique_ips']),
@@ -303,6 +364,10 @@ class PCAPParser:
             },
             'packets': all_packets
         }
+
+        if len(all_packets) == 0:
+            print("[PCAP Parser] WARNING: No packets were converted to JSON!")
+            full_data['statistics']['conversion_complete'] = False
 
         with open(output_path, 'w') as f:
             json.dump(full_data, f, indent=2)

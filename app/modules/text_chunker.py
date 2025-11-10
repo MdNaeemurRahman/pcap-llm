@@ -68,14 +68,24 @@ class TextChunker:
     def _format_chunk_for_embedding(self, packets: List[Dict[str, Any]], ips: set, domains: set, protocols: set) -> str:
         text_parts = []
 
-        text_parts.append(f"Network traffic chunk containing {len(packets)} packets.")
-        text_parts.append(f"Protocols: {', '.join(protocols)}")
-        text_parts.append(f"Unique IP addresses: {', '.join(list(ips)[:20])}")
-        if domains:
-            text_parts.append(f"Domains accessed: {', '.join(list(domains)[:20])}")
+        text_parts.append(f"Network traffic segment with {len(packets)} packets.")
+
+        protocol_list = list(protocols)
+        if protocol_list:
+            text_parts.append(f"Protocols observed: {', '.join(protocol_list)}")
+
+        ip_list = list(ips)
+        if ip_list:
+            text_parts.append(f"IP addresses involved: {', '.join(ip_list[:15])}")
+
+        domain_list = list(domains)
+        if domain_list:
+            text_parts.append(f"Domain names accessed: {', '.join(domain_list[:15])}")
 
         http_requests = []
         dns_queries = []
+        tcp_flags_summary = []
+        tls_connections = []
 
         for packet in packets:
             if 'http' in packet:
@@ -83,26 +93,61 @@ class TextChunker:
                 method = http_info.get('method', 'GET')
                 host = http_info.get('host', 'unknown')
                 uri = http_info.get('uri', '/')
-                http_requests.append(f"{method} {host}{uri}")
+                status = http_info.get('status_code', '')
+                request_desc = f"{method} {host}{uri}"
+                if status:
+                    request_desc += f" (Status: {status})"
+                http_requests.append(request_desc)
 
             if 'dns' in packet:
-                query = packet['dns'].get('query_name', '')
-                if query:
-                    dns_queries.append(query)
+                query_name = packet['dns'].get('query_name', '')
+                query_type = packet['dns'].get('query_type', '')
+                answer = packet['dns'].get('answer', '')
+                if query_name:
+                    dns_desc = f"{query_name}"
+                    if query_type:
+                        dns_desc += f" (Type: {query_type})"
+                    if answer:
+                        dns_desc += f" -> {answer}"
+                    dns_queries.append(dns_desc)
+
+            if 'tcp' in packet:
+                flags = packet['tcp'].get('flags')
+                if flags:
+                    src = packet.get('ip', {}).get('src', 'Unknown')
+                    dst = packet.get('ip', {}).get('dst', 'Unknown')
+                    src_port = packet['tcp'].get('src_port')
+                    dst_port = packet['tcp'].get('dst_port')
+                    tcp_flags_summary.append(f"{src}:{src_port} -> {dst}:{dst_port} [Flags: {flags}]")
+
+            if 'tls' in packet:
+                handshake = packet['tls'].get('handshake_type', '')
+                version = packet['tls'].get('version', '')
+                if handshake or version:
+                    tls_connections.append(f"TLS handshake: {handshake} Version: {version}")
 
         if http_requests:
-            text_parts.append(f"HTTP requests: {', '.join(http_requests[:10])}")
+            text_parts.append(f"HTTP activity: {'; '.join(http_requests[:8])}")
+
         if dns_queries:
-            text_parts.append(f"DNS queries: {', '.join(dns_queries[:10])}")
+            text_parts.append(f"DNS lookups: {'; '.join(dns_queries[:12])}")
+
+        if tcp_flags_summary[:3]:
+            text_parts.append(f"TCP connections: {'; '.join(tcp_flags_summary[:3])}")
+
+        if tls_connections[:3]:
+            text_parts.append(f"TLS sessions: {'; '.join(tls_connections[:3])}")
 
         flow_summary = []
-        for packet in packets[:5]:
+        for packet in packets[:8]:
             src = packet.get('ip', {}).get('src', packet.get('ipv6', {}).get('src', 'N/A'))
             dst = packet.get('ip', {}).get('dst', packet.get('ipv6', {}).get('dst', 'N/A'))
             proto = packet.get('protocol', 'UNKNOWN')
-            flow_summary.append(f"{src} -> {dst} ({proto})")
+            length = packet.get('length', 0)
+            flow_summary.append(f"{src} -> {dst} ({proto}, {length} bytes)")
 
-        text_parts.append(f"Sample flows: {', '.join(flow_summary)}")
+        if flow_summary:
+            text_parts.append(f"Traffic flows: {'; '.join(flow_summary)}")
 
         return " ".join(text_parts)
 

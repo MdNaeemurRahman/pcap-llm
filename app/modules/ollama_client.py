@@ -93,36 +93,67 @@ class OllamaClient:
             print(f"[Ollama LLM] Error: {str(e)}")
             return f"Error generating LLM response: {str(e)}"
 
-    def format_prompt_for_network_analysis(self, query: str, context: str, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
+    def format_prompt_for_network_analysis(self, query: str, context: str, chat_history: Optional[List[Dict[str, str]]] = None, query_classification: Optional[Dict[str, Any]] = None) -> str:
         prompt_parts = []
 
-        if chat_history:
-            prompt_parts.append("Previous conversation:")
-            for msg in chat_history[-5:]:
+        if chat_history and len(chat_history) > 0:
+            prompt_parts.append("Previous conversation context:")
+            for msg in chat_history[-3:]:
                 prompt_parts.append(f"User: {msg['user']}")
-                prompt_parts.append(f"Assistant: {msg['assistant']}")
+                prompt_parts.append(f"Assistant: {msg['assistant'][:200]}...") if len(msg['assistant']) > 200 else prompt_parts.append(f"Assistant: {msg['assistant']}")
             prompt_parts.append("")
 
-        prompt_parts.append("Network Traffic Analysis Context:")
-        prompt_parts.append(context)
-        prompt_parts.append("")
-        prompt_parts.append(f"User Question: {query}")
-        prompt_parts.append("")
-        prompt_parts.append("Please provide a detailed answer based on the network traffic data provided. Focus on security implications, traffic patterns, and any anomalies.")
+        if query_classification and not query_classification['requires_context']:
+            prompt_parts.append(f"User: {query}")
+            prompt_parts.append("")
+            prompt_parts.append("Please respond naturally to the user's message.")
+        else:
+            prompt_parts.append("Network Traffic Analysis Context:")
+            prompt_parts.append(context)
+            prompt_parts.append("")
+            prompt_parts.append(f"User Question: {query}")
+            prompt_parts.append("")
+
+            if query_classification:
+                if query_classification['is_summary_request']:
+                    prompt_parts.append("The user is asking for a summary. Provide a clear, concise overview of the key findings.")
+                elif query_classification['is_threat_focused']:
+                    prompt_parts.append("The user is asking about threats and security issues. Focus on VirusTotal results, suspicious IPs, domains, and potential security risks.")
+                else:
+                    prompt_parts.append("Answer the user's specific question based on the network traffic data. Be precise and cite relevant data points.")
+            else:
+                prompt_parts.append("Please provide a detailed answer based on the network traffic data provided. Focus on security implications, traffic patterns, and any anomalies.")
 
         return "\n".join(prompt_parts)
 
     def get_system_prompt(self) -> str:
-        return """You are a network security analyst assistant. Your task is to analyze network traffic data from PCAP files and help users understand security implications, traffic patterns, and potential threats.
+        return """You are an interactive network security analyst assistant. You help users analyze network traffic data from PCAP files in a conversational and friendly manner.
 
-When analyzing network traffic:
-- Identify suspicious IPs or domains based on VirusTotal results
-- Explain protocol distributions and what they indicate
-- Highlight unusual traffic patterns or behaviors
-- Provide security recommendations when relevant
-- Be clear and concise in your responses
+Your capabilities:
+- Respond naturally to greetings and casual conversation
+- Provide summaries and overviews of network traffic analysis
+- Answer specific questions about IPs, domains, protocols, and packets
+- Identify threats, malicious activity, and suspicious patterns using VirusTotal results
+- Explain security implications and provide recommendations
+- Engage in back-and-forth conversation to clarify user needs
 
-Always base your answers on the provided network traffic data."""
+Conversational guidelines:
+- When users greet you (hi, hello, etc.), respond warmly and introduce yourself briefly
+- If users ask what you can do, explain your capabilities and offer to help
+- When users ask for a summary, provide a clear overview of key findings
+- For specific questions, provide precise answers based on the traffic data
+- If information isn't in the provided context, politely say so and suggest related information you can provide
+- Maintain conversation context and reference previous exchanges when relevant
+- Be concise but informative - adjust detail level based on user's questions
+
+Security analysis focus:
+- Always highlight malicious or suspicious entities flagged by VirusTotal
+- Explain protocol distributions and their implications
+- Identify unusual patterns or anomalies in traffic
+- Provide actionable security recommendations
+- Cite specific data points (IPs, domains, packet counts) when making claims
+
+Remember: You're having a conversation with a human analyst. Be helpful, interactive, and adaptive to their needs."""
 
     def handle_streaming_response(self, prompt: str, system_prompt: Optional[str] = None):
         url = f"{self.base_url}/api/generate"

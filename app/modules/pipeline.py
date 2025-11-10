@@ -48,7 +48,11 @@ class AnalysisPipeline:
             print("Querying VirusTotal...")
             ips = summary['unique_entities']['ips'][:50]
             domains = summary['unique_entities']['domains'][:50]
-            vt_results = self.vt_client.batch_query_entities(ips, domains)
+
+            file_hash = summary['file_info']['file_hash']
+            file_hashes = [file_hash] if file_hash else []
+
+            vt_results = self.vt_client.batch_query_entities(ips, domains, file_hashes)
 
             vt_output = self.json_outputs_dir / f"{analysis_id}_virustotal.json"
             with open(vt_output, 'w') as f:
@@ -104,7 +108,11 @@ class AnalysisPipeline:
             print("Querying VirusTotal...")
             ips = full_data['unique_entities']['ips'][:50]
             domains = full_data['unique_entities']['domains'][:50]
-            vt_results = self.vt_client.batch_query_entities(ips, domains)
+
+            file_hash = full_data['file_info']['file_hash']
+            file_hashes = [file_hash] if file_hash else []
+
+            vt_results = self.vt_client.batch_query_entities(ips, domains, file_hashes)
 
             vt_output = self.json_outputs_dir / f"{analysis_id}_virustotal.json"
             with open(vt_output, 'w') as f:

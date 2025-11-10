@@ -138,6 +138,20 @@ class SupabaseManager:
                     'category': result.get('category'),
                     'queried_at': result['queried_at']
                 }
+
+                if result['entity_type'] == 'file':
+                    record['file_type'] = result.get('file_type')
+                    record['file_size'] = result.get('file_size')
+                    record['threat_label'] = result.get('threat_label')
+                    record['threat_category'] = result.get('threat_category', [])
+                    record['detection_engines'] = result.get('detection_engines', [])
+                    record['sandbox_verdicts'] = result.get('sandbox_verdicts', [])
+                    record['md5'] = result.get('md5')
+                    record['sha1'] = result.get('sha1')
+                    record['sha256'] = result.get('sha256')
+                    record['first_submission_date'] = result.get('first_submission_date')
+                    record['last_analysis_date'] = result.get('last_analysis_date')
+
                 records.append(record)
 
             result = self.client.table('virustotal_results').insert(records).execute()
@@ -209,11 +223,25 @@ class SupabaseManager:
                 .select('*')\
                 .eq('analysis_id', analysis_id)\
                 .gt('malicious_count', 0)\
+                .order('malicious_count', desc=True)\
                 .execute()
 
             return result.data if result.data else []
         except Exception as e:
             print(f"Error getting flagged entities: {str(e)}")
+            return []
+
+    def get_file_hash_results(self, analysis_id: str) -> List[Dict[str, Any]]:
+        try:
+            result = self.client.table('virustotal_results')\
+                .select('*')\
+                .eq('analysis_id', analysis_id)\
+                .eq('entity_type', 'file')\
+                .execute()
+
+            return result.data if result.data else []
+        except Exception as e:
+            print(f"Error getting file hash results: {str(e)}")
             return []
 
     def get_vt_results(self, analysis_id: str) -> List[Dict[str, Any]]:

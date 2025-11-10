@@ -78,12 +78,57 @@ class VirusTotalClient:
             'queried_at': datetime.utcnow().isoformat()
         }
 
+        if entity_type == 'file':
+            parsed['file_type'] = attributes.get('type_description', 'Unknown')
+            parsed['file_size'] = attributes.get('size', 0)
+            parsed['md5'] = attributes.get('md5', '')
+            parsed['sha1'] = attributes.get('sha1', '')
+            parsed['sha256'] = attributes.get('sha256', '')
+            parsed['first_submission_date'] = attributes.get('first_submission_date', None)
+            parsed['last_analysis_date'] = attributes.get('last_analysis_date', None)
+
+            popular_threat_classification = attributes.get('popular_threat_classification', {})
+            if popular_threat_classification:
+                parsed['threat_label'] = popular_threat_classification.get('suggested_threat_label', 'Unknown')
+                parsed['threat_category'] = popular_threat_classification.get('popular_threat_category', [])
+
+            last_analysis_results = attributes.get('last_analysis_results', {})
+            if last_analysis_results:
+                detected_engines = []
+                for engine, result in last_analysis_results.items():
+                    if result.get('category') in ['malicious', 'suspicious']:
+                        detected_engines.append({
+                            'engine': engine,
+                            'category': result.get('category'),
+                            'result': result.get('result', 'Unknown')
+                        })
+                parsed['detection_engines'] = detected_engines[:10]
+
+            sandbox_verdicts = attributes.get('sandbox_verdicts', {})
+            if sandbox_verdicts:
+                parsed['sandbox_verdicts'] = []
+                for sandbox, verdict in sandbox_verdicts.items():
+                    if verdict:
+                        parsed['sandbox_verdicts'].append({
+                            'sandbox': sandbox,
+                            'category': verdict.get('category', 'unknown'),
+                            'malware_names': verdict.get('malware_names', [])
+                        })
+
         return parsed
 
-    def batch_query_entities(self, ips: List[str], domains: List[str]) -> List[Dict[str, Any]]:
+    def batch_query_entities(self, ips: List[str], domains: List[str], file_hashes: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         results = []
 
-        print(f"[VirusTotal] Starting batch query: {len(ips)} IPs and {len(domains)} domains")
+        print(f"[VirusTotal] Starting batch query: {len(ips)} IPs, {len(domains)} domains, and {len(file_hashes) if file_hashes else 0} file hashes")
+
+        if file_hashes:
+            for idx, file_hash in enumerate(file_hashes, 1):
+                print(f"[VirusTotal] Querying file hash {idx}/{len(file_hashes)}: {file_hash[:16]}...")
+                result = self.query_file_hash(file_hash)
+                if result:
+                    results.append(result)
+                time.sleep(self.rate_limit_delay)
 
         for idx, ip in enumerate(ips, 1):
             print(f"[VirusTotal] Querying IP {idx}/{len(ips)}: {ip}")
