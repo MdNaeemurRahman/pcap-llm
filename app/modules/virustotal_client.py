@@ -61,6 +61,27 @@ class VirusTotalClient:
             return self._parse_vt_response(result['data'], 'domain', domain)
         return None
 
+    def _convert_timestamp_to_iso(self, timestamp_value: Any) -> Optional[str]:
+        """Convert Unix timestamp to ISO format datetime string."""
+        if timestamp_value is None:
+            return None
+
+        try:
+            if isinstance(timestamp_value, (int, float)):
+                dt = datetime.fromtimestamp(timestamp_value)
+                return dt.isoformat()
+            elif isinstance(timestamp_value, str):
+                try:
+                    timestamp_int = int(timestamp_value)
+                    dt = datetime.fromtimestamp(timestamp_int)
+                    return dt.isoformat()
+                except ValueError:
+                    return timestamp_value
+            return None
+        except (ValueError, OSError, OverflowError) as e:
+            print(f"Warning: Failed to convert timestamp {timestamp_value}: {str(e)}")
+            return None
+
     def _parse_vt_response(self, data: Dict[str, Any], entity_type: str, entity_value: str) -> Dict[str, Any]:
         attributes = data.get('attributes', {})
         last_analysis_stats = attributes.get('last_analysis_stats', {})
@@ -84,8 +105,18 @@ class VirusTotalClient:
             parsed['md5'] = attributes.get('md5', '')
             parsed['sha1'] = attributes.get('sha1', '')
             parsed['sha256'] = attributes.get('sha256', '')
-            parsed['first_submission_date'] = attributes.get('first_submission_date', None)
-            parsed['last_analysis_date'] = attributes.get('last_analysis_date', None)
+
+            first_submission = attributes.get('first_submission_date')
+            if first_submission:
+                parsed['first_submission_date'] = self._convert_timestamp_to_iso(first_submission)
+            else:
+                parsed['first_submission_date'] = None
+
+            last_analysis = attributes.get('last_analysis_date')
+            if last_analysis:
+                parsed['last_analysis_date'] = self._convert_timestamp_to_iso(last_analysis)
+            else:
+                parsed['last_analysis_date'] = None
 
             popular_threat_classification = attributes.get('popular_threat_classification', {})
             if popular_threat_classification:

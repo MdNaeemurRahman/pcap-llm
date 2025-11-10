@@ -6,7 +6,55 @@ class TextChunker:
     def __init__(self, max_chunk_size: int = 100):
         self.max_chunk_size = max_chunk_size
 
-    def chunk_by_packet_range(self, full_json_data: Dict[str, Any], vt_results: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    def _normalize_vt_results(self, vt_results: Any) -> Dict[str, Any]:
+        """Normalize VT results to dictionary format with 'results' key."""
+        if isinstance(vt_results, dict) and 'results' in vt_results:
+            return vt_results
+
+        if isinstance(vt_results, list):
+            normalized = {
+                'results': {
+                    'ip': {},
+                    'domain': {},
+                    'file': {}
+                }
+            }
+
+            for item in vt_results:
+                if not isinstance(item, dict):
+                    continue
+
+                entity_type = item.get('entity_type')
+                entity_value = item.get('entity_value')
+
+                if not entity_type or not entity_value:
+                    continue
+
+                entity_data = {
+                    'malicious': item.get('malicious_count', 0),
+                    'suspicious': item.get('suspicious_count', 0),
+                    'harmless': item.get('harmless_count', 0),
+                    'undetected': item.get('undetected_count', 0),
+                    'threat_label': item.get('threat_label', 'Unknown'),
+                    'categories': []
+                }
+
+                if entity_type == 'domain' and item.get('category'):
+                    entity_data['categories'] = list(item['category'].values()) if isinstance(item['category'], dict) else []
+
+                if entity_type == 'file':
+                    entity_data['detection_engines'] = item.get('detection_engines', [])
+                    entity_data['threat_category'] = item.get('threat_category', [])
+                    entity_data['sandbox_verdicts'] = item.get('sandbox_verdicts', [])
+
+                if entity_type in normalized['results']:
+                    normalized['results'][entity_type][entity_value] = entity_data
+
+            return normalized
+
+        return {}
+
+    def chunk_by_packet_range(self, full_json_data: Dict[str, Any], vt_results: Optional[Any] = None) -> List[Dict[str, Any]]:
         packets = full_json_data.get('packets', [])
         if not packets:
             return []
@@ -14,7 +62,8 @@ class TextChunker:
         chunks = []
         chunk_index = 0
 
-        vt_lookup = self._build_vt_lookup(vt_results) if vt_results else {}
+        normalized_vt_results = self._normalize_vt_results(vt_results) if vt_results else {}
+        vt_lookup = self._build_vt_lookup(normalized_vt_results) if normalized_vt_results else {}
 
         for i in range(0, len(packets), self.max_chunk_size):
             chunk_packets = packets[i:i + self.max_chunk_size]
@@ -22,8 +71,8 @@ class TextChunker:
             chunks.append(chunk)
             chunk_index += 1
 
-        if vt_results and vt_results.get('results'):
-            threat_chunks = self._create_threat_intelligence_chunks(vt_results, chunk_index)
+        if normalized_vt_results and normalized_vt_results.get('results'):
+            threat_chunks = self._create_threat_intelligence_chunks(normalized_vt_results, chunk_index)
             chunks.extend(threat_chunks)
 
         return chunks

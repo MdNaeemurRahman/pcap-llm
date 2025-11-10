@@ -123,6 +123,30 @@ class SupabaseManager:
             print(f"Error updating analysis status: {str(e)}")
             return False
 
+    def _convert_timestamp_to_iso(self, timestamp_value: Any) -> Optional[str]:
+        """Convert Unix timestamp (int or string) to ISO format datetime string."""
+        if timestamp_value is None:
+            return None
+
+        try:
+            if isinstance(timestamp_value, str):
+                if timestamp_value.strip() == '':
+                    return None
+                try:
+                    timestamp_int = int(timestamp_value)
+                except ValueError:
+                    return timestamp_value
+            elif isinstance(timestamp_value, (int, float)):
+                timestamp_int = int(timestamp_value)
+            else:
+                return None
+
+            dt = datetime.fromtimestamp(timestamp_int)
+            return dt.isoformat()
+        except (ValueError, OSError, OverflowError) as e:
+            print(f"Warning: Failed to convert timestamp {timestamp_value}: {str(e)}")
+            return None
+
     def bulk_insert_vt_results(
         self,
         analysis_id: str,
@@ -134,6 +158,13 @@ class SupabaseManager:
 
             records = []
             for result in vt_results:
+                queried_at = result.get('queried_at')
+                if isinstance(queried_at, str) and queried_at.strip() and not queried_at.endswith('Z'):
+                    try:
+                        datetime.fromisoformat(queried_at.replace('Z', ''))
+                    except ValueError:
+                        queried_at = self._convert_timestamp_to_iso(queried_at)
+
                 record = {
                     'analysis_id': analysis_id,
                     'entity_type': result['entity_type'],
@@ -141,7 +172,7 @@ class SupabaseManager:
                     'malicious_count': result['malicious_count'],
                     'last_analysis_stats': result['last_analysis_stats'],
                     'category': result.get('category'),
-                    'queried_at': result['queried_at']
+                    'queried_at': queried_at
                 }
 
                 if result['entity_type'] == 'file':
@@ -154,8 +185,14 @@ class SupabaseManager:
                     record['md5'] = result.get('md5')
                     record['sha1'] = result.get('sha1')
                     record['sha256'] = result.get('sha256')
-                    record['first_submission_date'] = result.get('first_submission_date')
-                    record['last_analysis_date'] = result.get('last_analysis_date')
+
+                    first_submission = result.get('first_submission_date')
+                    if first_submission:
+                        record['first_submission_date'] = self._convert_timestamp_to_iso(first_submission)
+
+                    last_analysis = result.get('last_analysis_date')
+                    if last_analysis:
+                        record['last_analysis_date'] = self._convert_timestamp_to_iso(last_analysis)
 
                 records.append(record)
 
