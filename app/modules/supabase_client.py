@@ -77,6 +77,7 @@ class SupabaseManager:
                 'filename': filename,
                 'file_hash': file_hash,
                 'analysis_mode': analysis_mode,
+                'current_mode': analysis_mode,
                 'status': 'uploaded'
             }
 
@@ -93,13 +94,17 @@ class SupabaseManager:
         self,
         analysis_id: str,
         status: str,
-        stats: Optional[Dict[str, Any]] = None
+        stats: Optional[Dict[str, Any]] = None,
+        current_mode: Optional[str] = None
     ) -> bool:
         try:
             update_data = {
                 'status': status,
                 'updated_at': datetime.utcnow().isoformat()
             }
+
+            if current_mode:
+                update_data['current_mode'] = current_mode
 
             if stats:
                 if 'total_packets' in stats:

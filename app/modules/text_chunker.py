@@ -1,12 +1,12 @@
 import json
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 
 class TextChunker:
     def __init__(self, max_chunk_size: int = 100):
         self.max_chunk_size = max_chunk_size
 
-    def chunk_by_packet_range(self, full_json_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def chunk_by_packet_range(self, full_json_data: Dict[str, Any], vt_results: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         packets = full_json_data.get('packets', [])
         if not packets:
             return []
@@ -14,32 +14,79 @@ class TextChunker:
         chunks = []
         chunk_index = 0
 
+        vt_lookup = self._build_vt_lookup(vt_results) if vt_results else {}
+
         for i in range(0, len(packets), self.max_chunk_size):
             chunk_packets = packets[i:i + self.max_chunk_size]
-            chunk = self._create_chunk(chunk_packets, chunk_index, i, min(i + self.max_chunk_size, len(packets)))
+            chunk = self._create_chunk(chunk_packets, chunk_index, i, min(i + self.max_chunk_size, len(packets)), vt_lookup)
             chunks.append(chunk)
             chunk_index += 1
 
         return chunks
 
-    def _create_chunk(self, packets: List[Dict[str, Any]], chunk_index: int, start_idx: int, end_idx: int) -> Dict[str, Any]:
+    def _build_vt_lookup(self, vt_results: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        lookup = {}
+
+        if not vt_results or 'results' not in vt_results:
+            return lookup
+
+        for entity_type, entities in vt_results['results'].items():
+            for entity_value, entity_data in entities.items():
+                if entity_data and entity_data.get('malicious', 0) > 0:
+                    lookup[entity_value] = {
+                        'type': entity_type,
+                        'malicious_count': entity_data.get('malicious', 0),
+                        'suspicious_count': entity_data.get('suspicious', 0),
+                        'threat_label': entity_data.get('threat_label', 'Unknown'),
+                        'categories': entity_data.get('categories', [])
+                    }
+
+        return lookup
+
+    def _create_chunk(self, packets: List[Dict[str, Any]], chunk_index: int, start_idx: int, end_idx: int, vt_lookup: Dict[str, Dict[str, Any]] = None) -> Dict[str, Any]:
+        if vt_lookup is None:
+            vt_lookup = {}
+
         ips = set()
         domains = set()
         protocols = set()
         timestamps = []
+        threats_in_chunk = []
 
         for packet in packets:
             if 'ip' in packet:
-                ips.add(packet['ip']['src'])
-                ips.add(packet['ip']['dst'])
+                src_ip = packet['ip']['src']
+                dst_ip = packet['ip']['dst']
+                ips.add(src_ip)
+                ips.add(dst_ip)
+
+                if src_ip in vt_lookup and src_ip not in [t['entity'] for t in threats_in_chunk]:
+                    threats_in_chunk.append({'entity': src_ip, 'info': vt_lookup[src_ip]})
+                if dst_ip in vt_lookup and dst_ip not in [t['entity'] for t in threats_in_chunk]:
+                    threats_in_chunk.append({'entity': dst_ip, 'info': vt_lookup[dst_ip]})
+
             if 'ipv6' in packet:
-                ips.add(packet['ipv6']['src'])
-                ips.add(packet['ipv6']['dst'])
+                src_ip6 = packet['ipv6']['src']
+                dst_ip6 = packet['ipv6']['dst']
+                ips.add(src_ip6)
+                ips.add(dst_ip6)
+
+                if src_ip6 in vt_lookup and src_ip6 not in [t['entity'] for t in threats_in_chunk]:
+                    threats_in_chunk.append({'entity': src_ip6, 'info': vt_lookup[src_ip6]})
+                if dst_ip6 in vt_lookup and dst_ip6 not in [t['entity'] for t in threats_in_chunk]:
+                    threats_in_chunk.append({'entity': dst_ip6, 'info': vt_lookup[dst_ip6]})
 
             if 'dns' in packet and 'query_name' in packet['dns']:
-                domains.add(packet['dns']['query_name'])
+                query_domain = packet['dns']['query_name']
+                domains.add(query_domain)
+                if query_domain in vt_lookup and query_domain not in [t['entity'] for t in threats_in_chunk]:
+                    threats_in_chunk.append({'entity': query_domain, 'info': vt_lookup[query_domain]})
+
             if 'http' in packet and 'host' in packet['http']:
-                domains.add(packet['http']['host'])
+                http_host = packet['http']['host']
+                domains.add(http_host)
+                if http_host in vt_lookup and http_host not in [t['entity'] for t in threats_in_chunk]:
+                    threats_in_chunk.append({'entity': http_host, 'info': vt_lookup[http_host]})
 
             if 'protocol' in packet:
                 protocols.add(packet['protocol'])
@@ -47,7 +94,7 @@ class TextChunker:
             if 'timestamp' in packet:
                 timestamps.append(packet['timestamp'])
 
-        chunk_text = self._format_chunk_for_embedding(packets, ips, domains, protocols)
+        chunk_text = self._format_chunk_for_embedding(packets, ips, domains, protocols, threats_in_chunk)
 
         return {
             'chunk_index': chunk_index,
@@ -61,14 +108,32 @@ class TextChunker:
                     'start': timestamps[0] if timestamps else None,
                     'end': timestamps[-1] if timestamps else None
                 },
-                'packet_count': len(packets)
+                'packet_count': len(packets),
+                'threat_count': len(threats_in_chunk),
+                'has_threats': len(threats_in_chunk) > 0
             }
         }
 
-    def _format_chunk_for_embedding(self, packets: List[Dict[str, Any]], ips: set, domains: set, protocols: set) -> str:
+    def _format_chunk_for_embedding(self, packets: List[Dict[str, Any]], ips: set, domains: set, protocols: set, threats: List[Dict[str, Any]]) -> str:
         text_parts = []
 
         text_parts.append(f"Network traffic segment with {len(packets)} packets.")
+
+        if threats:
+            text_parts.append(f"\n=== VIRUSTOTAL THREAT INTELLIGENCE ({len(threats)} threats detected) ===")
+            for threat in threats[:10]:
+                entity = threat['entity']
+                info = threat['info']
+                threat_desc = f"THREAT DETECTED: {info['type'].upper()} {entity} "
+                threat_desc += f"flagged by {info['malicious_count']} security vendors"
+                if info.get('threat_label'):
+                    threat_desc += f" as {info['threat_label']}"
+                if info.get('suspicious_count', 0) > 0:
+                    threat_desc += f" (suspicious: {info['suspicious_count']})"
+                if info.get('categories'):
+                    threat_desc += f". Categories: {', '.join(info['categories'][:3])}"
+                text_parts.append(threat_desc)
+            text_parts.append("")
 
         protocol_list = list(protocols)
         if protocol_list:

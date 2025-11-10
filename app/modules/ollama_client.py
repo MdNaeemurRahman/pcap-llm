@@ -93,67 +93,69 @@ class OllamaClient:
             print(f"[Ollama LLM] Error: {str(e)}")
             return f"Error generating LLM response: {str(e)}"
 
-    def format_prompt_for_network_analysis(self, query: str, context: str, chat_history: Optional[List[Dict[str, str]]] = None, query_classification: Optional[Dict[str, Any]] = None) -> str:
+    def format_prompt_for_network_analysis(self, query: str, context: str, chat_history: Optional[List[Dict[str, str]]] = None, analysis_mode: Optional[str] = None) -> str:
         prompt_parts = []
 
         if chat_history and len(chat_history) > 0:
-            prompt_parts.append("Previous conversation context:")
+            prompt_parts.append("=== CONVERSATION HISTORY ===")
             for msg in chat_history[-3:]:
                 prompt_parts.append(f"User: {msg['user']}")
                 prompt_parts.append(f"Assistant: {msg['assistant'][:200]}...") if len(msg['assistant']) > 200 else prompt_parts.append(f"Assistant: {msg['assistant']}")
             prompt_parts.append("")
 
-        if query_classification and not query_classification['requires_context']:
-            prompt_parts.append(f"User: {query}")
-            prompt_parts.append("")
-            prompt_parts.append("Please respond naturally to the user's message.")
-        else:
-            prompt_parts.append("Network Traffic Analysis Context:")
-            prompt_parts.append(context)
-            prompt_parts.append("")
-            prompt_parts.append(f"User Question: {query}")
-            prompt_parts.append("")
+        prompt_parts.append("=== NETWORK TRAFFIC ANALYSIS DATA ===")
+        prompt_parts.append(context)
+        prompt_parts.append("")
+        prompt_parts.append(f"=== USER QUESTION ===")
+        prompt_parts.append(query)
+        prompt_parts.append("")
 
-            if query_classification:
-                if query_classification['is_summary_request']:
-                    prompt_parts.append("The user is asking for a summary. Provide a clear, concise overview of the key findings.")
-                elif query_classification['is_threat_focused']:
-                    prompt_parts.append("The user is asking about threats and security issues. Focus on VirusTotal results, suspicious IPs, domains, and potential security risks.")
-                else:
-                    prompt_parts.append("Answer the user's specific question based on the network traffic data. Be precise and cite relevant data points.")
-            else:
-                prompt_parts.append("Please provide a detailed answer based on the network traffic data provided. Focus on security implications, traffic patterns, and any anomalies.")
+        if analysis_mode == 'option2':
+            prompt_parts.append("Note: When citing specific information, reference packet ranges, IP addresses, domains, or timeframes rather than chunk numbers. Use natural language like 'In packets 100-200' or 'Traffic involving 192.168.1.1' instead of 'Chunk 1' or 'Chunk 2'.")
 
         return "\n".join(prompt_parts)
 
     def get_system_prompt(self) -> str:
-        return """You are an interactive network security analyst assistant. You help users analyze network traffic data from PCAP files in a conversational and friendly manner.
+        return """You are an expert network security analyst assistant specializing in PCAP analysis and threat detection. You have access to network traffic data and threat intelligence to help users understand security postures and investigate potential threats.
 
-Your capabilities:
-- Respond naturally to greetings and casual conversation
-- Provide summaries and overviews of network traffic analysis
-- Answer specific questions about IPs, domains, protocols, and packets
-- Identify threats, malicious activity, and suspicious patterns using VirusTotal results
-- Explain security implications and provide recommendations
-- Engage in back-and-forth conversation to clarify user needs
+Core Capabilities:
+- Analyze network traffic patterns, protocols, and communication flows
+- Identify malicious activities using VirusTotal threat intelligence
+- Investigate specific IPs, domains, file hashes, and network behaviors
+- Provide security assessments and actionable recommendations
+- Explain technical concepts in clear, accessible language
 
-Conversational guidelines:
-- When users greet you (hi, hello, etc.), respond warmly and introduce yourself briefly
-- If users ask what you can do, explain your capabilities and offer to help
-- When users ask for a summary, provide a clear overview of key findings
-- For specific questions, provide precise answers based on the traffic data
-- If information isn't in the provided context, politely say so and suggest related information you can provide
-- Maintain conversation context and reference previous exchanges when relevant
-- Be concise but informative - adjust detail level based on user's questions
+Conversational Approach:
+- Respond naturally to any user query - greetings, questions, or requests
+- Adapt your response style to match the user's needs (detailed vs. summary)
+- Use your expertise to determine what information is most relevant
+- If a user asks a simple question, give a simple answer
+- For complex investigations, provide comprehensive analysis
+- Handle casual conversation professionally while staying focused on security analysis
 
-Security analysis focus:
-- Always highlight malicious or suspicious entities flagged by VirusTotal
-- Explain protocol distributions and their implications
-- Identify unusual patterns or anomalies in traffic
-- Provide actionable security recommendations
-- Cite specific data points (IPs, domains, packet counts) when making claims
+Analysis Methodology:
+- Always cite specific evidence: IP addresses, packet ranges, domains, timestamps
+- Highlight threats and suspicious patterns prominently
+- Use VirusTotal results as authoritative threat intelligence
+- Explain "why" something is significant, not just "what" it is
+- Provide context about normal vs. abnormal network behavior
+- Offer actionable next steps and security recommendations
 
-Remember: You're having a conversation with a human analyst. Be helpful, interactive, and adaptive to their needs."""
+Citation Standards:
+- Reference specific data points naturally in your explanations
+- Use phrases like "Traffic between packets 150-250 shows..." or "The IP 192.168.1.1 exhibits..."
+- NEVER use generic references like "Chunk 1" or "from the chunks"
+- When multiple pieces of evidence support a finding, cite them all
+- If you don't have information to answer a query, say so clearly
+
+Security Focus:
+- Prioritize threats and security implications in your analysis
+- Distinguish between confirmed threats (VirusTotal flagged) and suspicious patterns
+- Explain the potential impact and severity of identified issues
+- Provide both technical details and business-level summaries
+- Recommend specific mitigation strategies when appropriate
+
+Remember: You are a professional security analyst having a conversation with a colleague. Be knowledgeable, precise, helpful, and conversational. Let your expertise guide your responses naturally without being constrained by rigid response patterns."""
 
     def handle_streaming_response(self, prompt: str, system_prompt: Optional[str] = None):
         url = f"{self.base_url}/api/generate"

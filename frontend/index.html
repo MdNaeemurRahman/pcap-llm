@@ -449,6 +449,7 @@
         let currentAnalysisId = null;
         let currentFileHash = null;
         let statusCheckInterval = null;
+        let currentMode = null;
 
         marked.setOptions({
             highlight: function(code, lang) {
@@ -542,6 +543,21 @@
                 return;
             }
 
+            // Check for mode switch
+            if (currentMode && currentMode !== mode && !reanalyzeMode) {
+                const modeNames = { 'option1': 'Summary Chat', 'option2': 'Full Context Chat' };
+                const confirmSwitch = confirm(
+                    `You are currently using ${modeNames[currentMode]}. Switching to ${modeNames[mode]} will:\n\n` +
+                    (mode === 'option2' ? '- Create vector embeddings for detailed analysis\n- Clear your chat history\n- Take a few moments to process' :
+                     '- Use summary data for faster responses\n- Clear your chat history') +
+                    '\n\nDo you want to proceed?'
+                );
+
+                if (!confirmSwitch) {
+                    return;
+                }
+            }
+
             analyzeBtn.disabled = true;
             analysisStatus.innerHTML = '<div class="status-box info">Starting analysis... <span class="loader"></span></div>';
 
@@ -560,9 +576,20 @@
 
                 if (response.ok) {
                     currentAnalysisId = result.analysis_id;
-                    analysisStatus.innerHTML = `<div class="status-box info">Analysis in progress (${mode})... <span class="loader"></span></div>`;
-                    reanalyzeMode = false;
-                    startStatusPolling();
+                    currentMode = result.mode || mode;
+
+                    if (result.status === 'ready') {
+                        analysisStatus.innerHTML = `<div class="status-box success">${result.message}</div>`;
+                        chatContainer.style.display = 'block';
+                        statsSection.classList.remove('hidden');
+                        analyzeBtn.disabled = false;
+                        chatMessages.innerHTML = '';
+                    } else {
+                        analysisStatus.innerHTML = `<div class="status-box info">${result.message} <span class="loader"></span></div>`;
+                        reanalyzeMode = false;
+                        chatMessages.innerHTML = '';
+                        startStatusPolling();
+                    }
                 } else {
                     analysisStatus.innerHTML = `<div class="status-box error">Analysis failed: ${result.detail}</div>`;
                     analyzeBtn.disabled = false;
@@ -604,7 +631,12 @@
             document.getElementById('statPackets').textContent = data.total_packets || '-';
             document.getElementById('statIPs').textContent = data.unique_ips_count || '-';
             document.getElementById('statDomains').textContent = data.unique_domains_count || '-';
-            document.getElementById('statStatus').textContent = data.status || '-';
+
+            const statusText = data.status || '-';
+            const modeText = data.current_mode ? ` (${data.current_mode === 'option1' ? 'Summary' : 'Full Context'})` : '';
+            document.getElementById('statStatus').textContent = statusText + modeText;
+
+            currentMode = data.current_mode || data.mode;
         }
 
         async function loadExistingAnalysis(analysisId) {
@@ -612,7 +644,17 @@
                 const response = await fetch(`/status/${analysisId}`);
                 const result = await response.json();
 
-                analysisSection.style.display = 'none';
+                currentMode = result.current_mode || result.mode;
+
+                // Update mode selector to reflect current mode
+                const modeRadios = document.querySelectorAll('input[name="mode"]');
+                modeRadios.forEach(radio => {
+                    if (radio.value === currentMode) {
+                        radio.checked = true;
+                    }
+                });
+
+                analysisSection.style.display = 'block';
                 updateStats(result);
                 statsSection.classList.remove('hidden');
 

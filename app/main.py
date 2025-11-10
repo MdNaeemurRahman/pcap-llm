@@ -165,12 +165,73 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
         # Check if analysis already exists for this file hash
         existing_analysis = supabase_manager.get_analysis_by_hash(file_hash)
         if existing_analysis:
-            if existing_analysis['status'] == 'ready':
+            current_mode = existing_analysis.get('current_mode', existing_analysis.get('analysis_mode'))
+
+            # If ready and mode matches, return existing
+            if existing_analysis['status'] == 'ready' and current_mode == request.mode:
                 return JSONResponse({
                     "message": "Analysis already completed",
                     "analysis_id": existing_analysis['id'],
-                    "status": "ready"
+                    "status": "ready",
+                    "mode": current_mode
                 })
+
+            # If ready but mode differs, handle mode switch
+            elif existing_analysis['status'] == 'ready' and current_mode != request.mode:
+                analysis_id = existing_analysis['id']
+                print(f"Mode switch detected: {current_mode} -> {request.mode}")
+
+                # Clear chat history for mode switch
+                try:
+                    supabase_manager.client.table('chat_messages').delete().eq('analysis_id', analysis_id).execute()
+                except Exception as e:
+                    print(f"Error clearing chat history: {e}")
+
+                # For option1 -> option2: need to create vector embeddings
+                if current_mode == 'option1' and request.mode == 'option2':
+                    print("Switching from Option 1 to Option 2: Creating vector embeddings...")
+                    supabase_manager.update_analysis_status(analysis_id, 'embedding', current_mode='option2')
+
+                    # Find the file
+                    pcap_files = list(settings.uploads_dir.glob("*.pcap")) + \
+                                 list(settings.uploads_dir.glob("*.pcapng")) + \
+                                 list(settings.uploads_dir.glob("*.cap"))
+
+                    file_path = None
+                    filename = None
+                    for pcap_file in pcap_files:
+                        from .modules.pcap_parser import PCAPParser
+                        parser = PCAPParser(str(pcap_file))
+                        if parser.compute_file_hash() == file_hash:
+                            file_path = str(pcap_file)
+                            filename = pcap_file.name
+                            break
+
+                    if file_path:
+                        background_tasks.add_task(
+                            pipeline.process_option2,
+                            file_path, filename, analysis_id
+                        )
+
+                        return JSONResponse({
+                            "message": "Switching to Option 2 mode - creating vector embeddings",
+                            "analysis_id": analysis_id,
+                            "mode": request.mode,
+                            "status": "processing"
+                        })
+
+                # For option2 -> option1: just update mode, no reprocessing needed
+                elif current_mode == 'option2' and request.mode == 'option1':
+                    print("Switching from Option 2 to Option 1: Using existing summary data")
+                    supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option1')
+
+                    return JSONResponse({
+                        "message": "Switched to Option 1 mode",
+                        "analysis_id": analysis_id,
+                        "mode": request.mode,
+                        "status": "ready"
+                    })
+
             elif existing_analysis['status'] in ['parsing', 'enriching', 'embedding', 'uploaded']:
                 return JSONResponse({
                     "message": "Analysis in progress",
@@ -238,10 +299,13 @@ async def get_status(analysis_id: str):
         if not analysis:
             raise HTTPException(status_code=404, detail="Analysis not found")
 
+        current_mode = analysis.get('current_mode', analysis.get('analysis_mode'))
+
         return JSONResponse({
             "analysis_id": analysis_id,
             "status": analysis['status'],
             "mode": analysis['analysis_mode'],
+            "current_mode": current_mode,
             "filename": analysis['filename'],
             "total_packets": analysis['total_packets'],
             "unique_ips_count": analysis['unique_ips_count'],
@@ -269,7 +333,10 @@ async def chat_query(request: ChatRequest):
                 detail=f"Analysis is not ready for queries. Current status: {analysis['status']}"
             )
 
-        if analysis['analysis_mode'] == 'option1':
+        # Use current_mode to determine which handler to use
+        current_mode = analysis.get('current_mode', analysis.get('analysis_mode'))
+
+        if current_mode == 'option1':
             result = chat_handler.handle_option1_query(request.analysis_id, request.query)
         else:
             result = chat_handler.handle_option2_query(request.analysis_id, request.query)

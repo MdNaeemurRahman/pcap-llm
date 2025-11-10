@@ -4,9 +4,6 @@ from typing import Dict, List, Any, Optional
 from .ollama_client import OllamaClient
 from .vector_store import VectorStoreManager
 from .supabase_client import SupabaseManager
-from .query_classifier import QueryClassifier
-
-
 class ChatHandler:
     def __init__(
         self,
@@ -19,19 +16,9 @@ class ChatHandler:
         self.vector_store = vector_store
         self.supabase = supabase_manager
         self.json_outputs_dir = Path(json_outputs_dir)
-        self.query_classifier = QueryClassifier()
 
     def handle_option1_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
-            query_classification = self.query_classifier.classify_query(query)
-            print(f"[Chat Handler] Query classified as: {query_classification['type']} - {query_classification['intent']}")
-
-            if query_classification['type'] == 'greeting':
-                return self._handle_greeting_query(analysis_id, query)
-
-            if query_classification['type'] == 'help':
-                return self._handle_help_query(analysis_id, query)
-
             analysis = self.supabase.get_analysis_by_id(analysis_id)
             if not analysis:
                 return {
@@ -55,7 +42,7 @@ class ChatHandler:
             with open(summary_file, 'r') as f:
                 summary_data = json.load(f)
 
-            context = self._format_summary_context(summary_data, query_classification)
+            context = self._format_summary_context(summary_data)
 
             chat_history = self.supabase.get_chat_history(analysis_id)
             formatted_history = [
@@ -67,7 +54,7 @@ class ChatHandler:
                 query=query,
                 context=context,
                 chat_history=formatted_history,
-                query_classification=query_classification
+                analysis_mode='option1'
             )
 
             system_prompt = self.ollama.get_system_prompt()
@@ -99,15 +86,6 @@ class ChatHandler:
 
     def handle_option2_query(self, analysis_id: str, query: str, top_k: int = 5) -> Dict[str, Any]:
         try:
-            query_classification = self.query_classifier.classify_query(query)
-            print(f"[Chat Handler] Query classified as: {query_classification['type']} - {query_classification['intent']}")
-
-            if query_classification['type'] == 'greeting':
-                return self._handle_greeting_query(analysis_id, query)
-
-            if query_classification['type'] == 'help':
-                return self._handle_help_query(analysis_id, query)
-
             analysis = self.supabase.get_analysis_by_id(analysis_id)
             if not analysis:
                 return {
@@ -140,7 +118,7 @@ class ChatHandler:
                     'message': 'No relevant chunks found for your query. Try rephrasing or asking about general statistics.'
                 }
 
-            context = self._format_rag_context(search_results['chunks'], query_classification)
+            context = self._format_rag_context(search_results['chunks'])
 
             chat_history = self.supabase.get_chat_history(analysis_id)
             formatted_history = [
@@ -152,7 +130,7 @@ class ChatHandler:
                 query=query,
                 context=context,
                 chat_history=formatted_history,
-                query_classification=query_classification
+                analysis_mode='option2'
             )
 
             system_prompt = self.ollama.get_system_prompt()
@@ -192,66 +170,7 @@ class ChatHandler:
                 'message': str(e)
             }
 
-    def _handle_greeting_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
-        greetings = [
-            "Hello! I'm your network security analyst assistant. I've analyzed your PCAP file and I'm ready to help you understand the network traffic, identify threats, and answer any questions you have. What would you like to know?",
-            "Hi there! I'm here to help you analyze the network traffic from your PCAP file. I can provide summaries, identify malicious activity, explain protocols, and answer specific questions. How can I assist you today?",
-            "Greetings! I'm your AI security analyst. I've processed your network capture and can help you investigate threats, analyze patterns, and understand the traffic. What aspect would you like to explore?"
-        ]
-
-        import random
-        response = random.choice(greetings)
-
-        self.supabase.insert_chat_message(
-            analysis_id=analysis_id,
-            user_query=query,
-            llm_response=response,
-            retrieved_chunks=None
-        )
-
-        return {
-            'status': 'success',
-            'response': response,
-            'mode': 'greeting'
-        }
-
-    def _handle_help_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
-        help_response = """I can help you with various aspects of network traffic analysis:
-
-**What I Can Do:**
-- Provide a summary of the entire network capture
-- Identify malicious IPs and domains using VirusTotal intelligence
-- Explain protocol distributions and traffic patterns
-- Answer questions about specific IPs, domains, or protocols
-- Analyze HTTP sessions and DNS queries
-- Highlight suspicious or unusual network behavior
-- Provide security recommendations
-
-**Example Questions You Can Ask:**
-- "Give me a summary of this capture"
-- "What malicious IPs were detected?"
-- "Show me suspicious domains"
-- "What are the top protocols used?"
-- "Are there any security threats?"
-- "Tell me about HTTP traffic"
-- "What DNS queries were made?"
-
-Feel free to ask me anything about the network traffic!"""
-
-        self.supabase.insert_chat_message(
-            analysis_id=analysis_id,
-            user_query=query,
-            llm_response=help_response,
-            retrieved_chunks=None
-        )
-
-        return {
-            'status': 'success',
-            'response': help_response,
-            'mode': 'help'
-        }
-
-    def _format_summary_context(self, summary_data: Dict[str, Any], query_classification: Optional[Dict[str, Any]] = None) -> str:
+    def _format_summary_context(self, summary_data: Dict[str, Any]) -> str:
         context_parts = []
 
         context_parts.append("=== PCAP FILE SUMMARY ===")
@@ -326,14 +245,16 @@ Feel free to ask me anything about the network traffic!"""
 
         return "\n".join(context_parts)
 
-    def _format_rag_context(self, chunks: List[Dict[str, Any]], query_classification: Optional[Dict[str, Any]] = None) -> str:
+    def _format_rag_context(self, chunks: List[Dict[str, Any]]) -> str:
         context_parts = []
 
-        context_parts.append("=== RELEVANT NETWORK TRAFFIC CHUNKS ===")
-        context_parts.append(f"Found {len(chunks)} relevant sections of network traffic:\n")
+        context_parts.append("=== RELEVANT NETWORK TRAFFIC DATA ===")
+        context_parts.append(f"Retrieved {len(chunks)} relevant segments from the network capture:\n")
 
         for i, chunk in enumerate(chunks, 1):
-            context_parts.append(f"--- Chunk {i} (Packets {chunk['metadata']['packet_range_start']}-{chunk['metadata']['packet_range_end']}) ---")
+            packet_start = chunk['metadata']['packet_range_start']
+            packet_end = chunk['metadata']['packet_range_end']
+            context_parts.append(f"--- Network Traffic Segment: Packets {packet_start}-{packet_end} ---")
             context_parts.append(chunk['text'])
             context_parts.append("")
 

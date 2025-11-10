@@ -67,7 +67,7 @@ class AnalysisPipeline:
 
             self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
 
-            self.supabase.update_analysis_status(analysis_id, 'ready', stats)
+            self.supabase.update_analysis_status(analysis_id, 'ready', stats, current_mode='option1')
 
             print("=== Option 1 Analysis Complete ===\n")
 
@@ -128,12 +128,12 @@ class AnalysisPipeline:
             self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
 
             self.supabase.update_analysis_status(analysis_id, 'embedding')
-            print("Chunking and embedding data...")
+            print("Chunking and embedding data with VirusTotal intelligence...")
 
             chunker = TextChunker(max_chunk_size=100)
-            chunks = chunker.chunk_by_packet_range(full_data)
+            chunks = chunker.chunk_by_packet_range(enriched_full, vt_results)
 
-            print(f"Created {len(chunks)} chunks")
+            print(f"Created {len(chunks)} chunks (with integrated threat intelligence)")
 
             print("Storing in vector database...")
             collection = self.vector_store.create_collection_for_pcap(analysis_id, delete_existing=True)
@@ -141,7 +141,7 @@ class AnalysisPipeline:
 
             self.supabase.bulk_insert_chunks_metadata(analysis_id, chunks)
 
-            self.supabase.update_analysis_status(analysis_id, 'ready', stats)
+            self.supabase.update_analysis_status(analysis_id, 'ready', stats, current_mode='option2')
 
             print("=== Option 2 Analysis Complete ===\n")
 
