@@ -22,6 +22,10 @@ class TextChunker:
             chunks.append(chunk)
             chunk_index += 1
 
+        if vt_results and vt_results.get('results'):
+            threat_chunks = self._create_threat_intelligence_chunks(vt_results, chunk_index)
+            chunks.extend(threat_chunks)
+
         return chunks
 
     def _build_vt_lookup(self, vt_results: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -110,7 +114,8 @@ class TextChunker:
                 },
                 'packet_count': len(packets),
                 'threat_count': len(threats_in_chunk),
-                'has_threats': len(threats_in_chunk) > 0
+                'has_threats': len(threats_in_chunk) > 0,
+                'chunk_type': 'packet_data'
             }
         }
 
@@ -248,6 +253,92 @@ class TextChunker:
     def validate_chunk_size(self, chunk_text: str, max_tokens: int = 2048) -> bool:
         estimated_tokens = len(chunk_text.split())
         return estimated_tokens <= max_tokens
+
+    def _create_threat_intelligence_chunks(self, vt_results: Dict[str, Any], start_index: int) -> List[Dict[str, Any]]:
+        chunks = []
+        chunk_index = start_index
+
+        if not vt_results or 'results' not in vt_results:
+            return chunks
+
+        threat_data = []
+        for entity_type, entities in vt_results['results'].items():
+            for entity_value, entity_data in entities.items():
+                if entity_data and (entity_data.get('malicious', 0) > 0 or entity_data.get('suspicious', 0) > 0):
+                    threat_data.append({
+                        'type': entity_type,
+                        'value': entity_value,
+                        'data': entity_data
+                    })
+
+        if not threat_data:
+            return chunks
+
+        threat_chunk_size = 10
+        for i in range(0, len(threat_data), threat_chunk_size):
+            batch = threat_data[i:i + threat_chunk_size]
+            chunk_text = self._format_threat_intelligence_chunk(batch)
+
+            chunk = {
+                'chunk_index': chunk_index,
+                'packet_range': {'start': -1, 'end': -1},
+                'chunk_text': chunk_text,
+                'metadata': {
+                    'ip_addresses': [t['value'] for t in batch if t['type'] == 'ip'],
+                    'domains': [t['value'] for t in batch if t['type'] == 'domain'],
+                    'protocols': [],
+                    'timestamp_range': {'start': None, 'end': None},
+                    'packet_count': 0,
+                    'threat_count': len(batch),
+                    'has_threats': True,
+                    'chunk_type': 'threat_intelligence'
+                }
+            }
+            chunks.append(chunk)
+            chunk_index += 1
+
+        return chunks
+
+    def _format_threat_intelligence_chunk(self, threats: List[Dict[str, Any]]) -> str:
+        text_parts = []
+
+        text_parts.append("=== VIRUSTOTAL THREAT INTELLIGENCE DATA ===")
+        text_parts.append(f"This chunk contains threat intelligence for {len(threats)} entities queried from VirusTotal.")
+        text_parts.append("The following IPs, domains, and file hashes were analyzed and flagged by security vendors:")
+        text_parts.append("")
+
+        for threat in threats:
+            entity_type = threat['type'].upper()
+            entity_value = threat['value']
+            data = threat['data']
+
+            malicious_count = data.get('malicious', 0)
+            suspicious_count = data.get('suspicious', 0)
+            threat_label = data.get('threat_label', 'Unknown')
+            categories = data.get('categories', [])
+
+            threat_desc = f"THREAT: {entity_type} {entity_value}\n"
+            threat_desc += f"  - Flagged as MALICIOUS by {malicious_count} security vendors\n"
+            if suspicious_count > 0:
+                threat_desc += f"  - Flagged as SUSPICIOUS by {suspicious_count} vendors\n"
+            if threat_label and threat_label != 'Unknown':
+                threat_desc += f"  - Threat Label: {threat_label}\n"
+            if categories:
+                threat_desc += f"  - Categories: {', '.join(categories[:5])}\n"
+
+            if entity_type == 'FILE':
+                if data.get('detection_engines'):
+                    threat_desc += f"  - Detection Engines: "
+                    engines = [f"{e['engine']}:{e['result']}" for e in data['detection_engines'][:3]]
+                    threat_desc += ", ".join(engines) + "\n"
+
+            text_parts.append(threat_desc)
+
+        text_parts.append("")
+        text_parts.append("NOTE: This threat intelligence data was obtained from VirusTotal and represents")
+        text_parts.append("confirmed threats detected in the analyzed network traffic.")
+
+        return "\n".join(text_parts)
 
     def extract_metadata_from_chunk(self, chunk: Dict[str, Any]) -> Dict[str, Any]:
         return chunk.get('metadata', {})

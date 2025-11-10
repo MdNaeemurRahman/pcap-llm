@@ -305,12 +305,18 @@ class SupabaseManager:
                 chunk_text = chunk['chunk_text']
                 chunk_hash = hashlib.sha256(chunk_text.encode()).hexdigest()
 
+                chunk_type = chunk['metadata'].get('chunk_type', 'packet_data')
+                has_threat_intelligence = chunk['metadata'].get('has_threats', False)
+
                 record = {
                     'analysis_id': analysis_id,
                     'chunk_index': chunk['chunk_index'],
+                    'chunk_text': chunk_text,
                     'vector_collection_name': vector_collection_name,
                     'chunk_hash': chunk_hash,
                     'chunk_size': len(chunk_text),
+                    'chunk_type': chunk_type,
+                    'has_threat_intelligence': has_threat_intelligence,
                     'ip_addresses': chunk['metadata'].get('ip_addresses', []),
                     'domains': chunk['metadata'].get('domains', []),
                     'timestamp_range': chunk['metadata'].get('timestamp_range', {})

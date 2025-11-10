@@ -252,9 +252,18 @@ class ChatHandler:
         context_parts.append(f"Retrieved {len(chunks)} relevant segments from the network capture:\n")
 
         for i, chunk in enumerate(chunks, 1):
-            packet_start = chunk['metadata']['packet_range_start']
-            packet_end = chunk['metadata']['packet_range_end']
-            context_parts.append(f"--- Network Traffic Segment: Packets {packet_start}-{packet_end} ---")
+            packet_start = chunk['metadata'].get('packet_range_start', -1)
+            packet_end = chunk['metadata'].get('packet_range_end', -1)
+
+            if packet_start == -1 or packet_end == -1:
+                context_parts.append("--- VIRUSTOTAL THREAT INTELLIGENCE SEGMENT ---")
+                context_parts.append("NOTE: This segment contains VirusTotal threat intelligence data.")
+                context_parts.append("IPs, domains, and file hashes in this segment were analyzed by VirusTotal")
+                context_parts.append("and flagged by multiple security vendors as malicious or suspicious.")
+                context_parts.append("")
+            else:
+                context_parts.append(f"--- Network Traffic Segment: Packets {packet_start}-{packet_end} ---")
+
             context_parts.append(chunk['text'])
             context_parts.append("")
 

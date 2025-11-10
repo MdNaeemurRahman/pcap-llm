@@ -220,17 +220,66 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                             "status": "processing"
                         })
 
-                # For option2 -> option1: just update mode, no reprocessing needed
+                # For option2 -> option1: check if summary exists, generate if needed
                 elif current_mode == 'option2' and request.mode == 'option1':
-                    print("Switching from Option 2 to Option 1: Using existing summary data and cached VirusTotal results")
-                    supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option1')
+                    print("Switching from Option 2 to Option 1")
 
-                    return JSONResponse({
-                        "message": "Switched to Option 1 mode (using cached data)",
-                        "analysis_id": analysis_id,
-                        "mode": request.mode,
-                        "status": "ready"
-                    })
+                    try:
+                        supabase_manager.client.table('chat_sessions').delete().eq('analysis_id', analysis_id).execute()
+                        print("Cleared chat history for mode switch")
+                    except Exception as e:
+                        print(f"Error clearing chat history: {e}")
+
+                    summary_file = settings.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
+
+                    if summary_file.exists():
+                        print("Summary file exists, switching to Option 1 mode")
+                        supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option1')
+
+                        return JSONResponse({
+                            "message": "Switched to Option 1 mode (using existing summary)",
+                            "analysis_id": analysis_id,
+                            "mode": request.mode,
+                            "status": "ready"
+                        })
+                    else:
+                        print("Summary file does not exist, generating it now")
+
+                        pcap_files = list(settings.uploads_dir.glob("*.pcap")) + \
+                                     list(settings.uploads_dir.glob("*.pcapng")) + \
+                                     list(settings.uploads_dir.glob("*.cap"))
+
+                        file_path = None
+                        filename = None
+                        for pcap_file in pcap_files:
+                            from .modules.pcap_parser import PCAPParser
+                            parser = PCAPParser(str(pcap_file))
+                            if parser.compute_file_hash() == file_hash:
+                                file_path = str(pcap_file)
+                                filename = pcap_file.name
+                                break
+
+                        if file_path:
+                            supabase_manager.update_analysis_status(analysis_id, 'parsing', current_mode='option1')
+
+                            background_tasks.add_task(
+                                pipeline.process_option1,
+                                file_path, filename, analysis_id
+                            )
+
+                            return JSONResponse({
+                                "message": "Switching to Option 1 mode - generating summary (reusing cached threat intelligence)",
+                                "analysis_id": analysis_id,
+                                "mode": request.mode,
+                                "status": "processing"
+                            })
+                        else:
+                            return JSONResponse({
+                                "message": "Cannot switch modes: PCAP file not found",
+                                "analysis_id": analysis_id,
+                                "mode": current_mode,
+                                "status": "ready"
+                            })
 
             elif existing_analysis['status'] in ['parsing', 'enriching', 'embedding', 'uploaded']:
                 return JSONResponse({

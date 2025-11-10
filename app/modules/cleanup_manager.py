@@ -156,14 +156,52 @@ class CleanupManager:
         try:
             analysis = self.supabase.get_analysis_by_id(analysis_id)
             if not analysis:
+                print(f"Analysis {analysis_id} not found in database")
                 return False
 
-            self.vector_store.delete_collection(analysis_id)
+            print(f"Starting deletion of analysis {analysis_id}")
+
+            print(f"Deleting vector collection for {analysis_id}...")
+            vector_deleted = self.vector_store.delete_collection(analysis_id)
+            if vector_deleted:
+                print(f"Vector collection deleted successfully")
+            else:
+                print(f"Warning: Vector collection deletion failed or not found")
+
+            print(f"Deleting analysis files for {analysis_id}...")
             self._delete_analysis_files(analysis_id, analysis['filename'])
 
+            print(f"Deleting chunks metadata from database...")
+            try:
+                self.supabase.client.table('chunks_metadata').delete().eq('analysis_id', analysis_id).execute()
+                print(f"Chunks metadata deleted")
+            except Exception as e:
+                print(f"Error deleting chunks metadata: {e}")
+
+            print(f"Deleting chat sessions from database...")
+            try:
+                self.supabase.client.table('chat_sessions').delete().eq('analysis_id', analysis_id).execute()
+                print(f"Chat sessions deleted")
+            except Exception as e:
+                print(f"Error deleting chat sessions: {e}")
+
+            print(f"Deleting VirusTotal results from database...")
+            try:
+                self.supabase.client.table('virustotal_results').delete().eq('analysis_id', analysis_id).execute()
+                print(f"VirusTotal results deleted")
+            except Exception as e:
+                print(f"Error deleting VT results: {e}")
+
+            print(f"Deleting analysis record from database...")
             result = self.supabase.client.table('pcap_analyses').delete().eq('id', analysis_id).execute()
 
-            return bool(result.data)
+            success = bool(result.data)
+            if success:
+                print(f"Analysis {analysis_id} deleted successfully")
+            else:
+                print(f"Failed to delete analysis record")
+
+            return success
 
         except Exception as e:
             print(f"Error deleting analysis {analysis_id}: {str(e)}")

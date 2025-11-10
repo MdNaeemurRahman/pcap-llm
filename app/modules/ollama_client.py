@@ -111,7 +111,12 @@ class OllamaClient:
         prompt_parts.append("")
 
         if analysis_mode == 'option2':
-            prompt_parts.append("Note: When citing specific information, reference packet ranges, IP addresses, domains, or timeframes rather than chunk numbers. Use natural language like 'In packets 100-200' or 'Traffic involving 192.168.1.1' instead of 'Chunk 1' or 'Chunk 2'.")
+            prompt_parts.append("Note: The context contains two types of data segments:")
+            prompt_parts.append("1. Network Traffic Segments - showing packet-level traffic analysis")
+            prompt_parts.append("2. VirusTotal Threat Intelligence Segments - showing confirmed threats from VirusTotal")
+            prompt_parts.append("When citing information, reference packet ranges, IP addresses, domains, or timeframes.")
+            prompt_parts.append("When discussing threats, clearly indicate whether they come from VirusTotal threat intelligence.")
+            prompt_parts.append("Use natural language like 'In packets 100-200' or 'According to VirusTotal threat intelligence' instead of 'Chunk 1' or 'Chunk 2'.")
 
         return "\n".join(prompt_parts)
 
