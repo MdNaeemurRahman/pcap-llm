@@ -449,6 +449,14 @@
                     <input type="radio" name="mode" value="option2">
                     <span><strong>Option 2: Full Context Chat</strong> - Deep analysis with RAG. Enables detailed packet-level queries and comprehensive investigation.</span>
                 </label>
+                <label id="option3Label">
+                    <input type="radio" name="mode" value="option3" id="option3Radio">
+                    <span><strong>Option 3: Agentic TShark</strong> - AI-powered dynamic analysis. LLM decides and executes custom TShark commands on-demand for targeted investigations.</span>
+                </label>
+            </div>
+            <div id="tsharkWarning" class="status-box warning" style="display: none;">
+                <strong>TShark Not Available</strong><br>
+                Option 3 requires TShark to be installed. Please install TShark/Wireshark to use this mode.
             </div>
             <button class="btn" id="analyzeBtn">Start Analysis</button>
             <div id="analysisStatus"></div>
@@ -493,6 +501,7 @@
         let currentFileHash = null;
         let statusCheckInterval = null;
         let currentMode = null;
+        let tsharkAvailable = false;
 
         marked.setOptions({
             highlight: function(code, lang) {
@@ -519,8 +528,38 @@
         const sendBtn = document.getElementById('sendBtn');
         const statsSection = document.getElementById('statsSection');
         const deleteBtn = document.getElementById('deleteBtn');
+        const option3Radio = document.getElementById('option3Radio');
+        const tsharkWarning = document.getElementById('tsharkWarning');
 
         uploadZone.addEventListener('click', () => fileInput.click());
+
+        async function checkTSharkAvailability() {
+            try {
+                const response = await fetch('/health');
+                const health = await response.json();
+                tsharkAvailable = health.tshark === 'installed';
+
+                if (!tsharkAvailable) {
+                    option3Radio.disabled = true;
+                    document.getElementById('option3Label').style.opacity = '0.6';
+                    document.getElementById('option3Label').style.cursor = 'not-allowed';
+                }
+            } catch (error) {
+                console.error('Error checking TShark availability:', error);
+            }
+        }
+
+        checkTSharkAvailability();
+
+        document.querySelectorAll('input[name="mode"]').forEach(radio => {
+            radio.addEventListener('change', (e) => {
+                if (e.target.value === 'option3' && !tsharkAvailable) {
+                    tsharkWarning.style.display = 'block';
+                } else {
+                    tsharkWarning.style.display = 'none';
+                }
+            });
+        });
 
         uploadZone.addEventListener('dragover', (e) => {
             e.preventDefault();
@@ -590,11 +629,20 @@
 
             // Check for mode switch
             if (currentMode && currentMode !== mode && !reanalyzeMode) {
-                const modeNames = { 'option1': 'Summary Chat', 'option2': 'Full Context Chat' };
+                const modeNames = { 'option1': 'Summary Chat', 'option2': 'Full Context Chat', 'option3': 'Agentic TShark' };
+                let switchMessage = '';
+
+                if (mode === 'option2') {
+                    switchMessage = '- Create vector embeddings for detailed analysis\n- Clear your chat history\n- Take a few moments to process';
+                } else if (mode === 'option3') {
+                    switchMessage = '- Enable AI-powered TShark command execution\n- Clear your chat history\n- Use summary data with dynamic querying';
+                } else {
+                    switchMessage = '- Use summary data for faster responses\n- Clear your chat history';
+                }
+
                 const confirmSwitch = confirm(
                     `You are currently using ${modeNames[currentMode]}. Switching to ${modeNames[mode]} will:\n\n` +
-                    (mode === 'option2' ? '- Create vector embeddings for detailed analysis\n- Clear your chat history\n- Take a few moments to process' :
-                     '- Use summary data for faster responses\n- Clear your chat history') +
+                    switchMessage +
                     '\n\nDo you want to proceed?'
                 );
 
@@ -679,7 +727,15 @@
             document.getElementById('statDomains').textContent = data.unique_domains_count || '-';
 
             const statusText = data.status || '-';
-            const modeText = data.current_mode ? ` (${data.current_mode === 'option1' ? 'Summary' : 'Full Context'})` : '';
+            let modeText = '';
+            if (data.current_mode) {
+                const modeMap = {
+                    'option1': 'Summary',
+                    'option2': 'Full Context',
+                    'option3': 'Agentic TShark'
+                };
+                modeText = ` (${modeMap[data.current_mode] || data.current_mode})`;
+            }
             document.getElementById('statStatus').textContent = statusText + modeText;
 
             currentMode = data.current_mode || data.mode;
