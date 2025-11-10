@@ -1,55 +1,91 @@
 import chromadb
 from chromadb.config import Settings
+from chromadb import Collection
 from typing import Dict, List, Any, Optional
 from pathlib import Path
+from datetime import datetime, timedelta
+from .ollama_embedding_function import OllamaEmbeddingFunction
 
 
 class VectorStoreManager:
-    def __init__(self, persist_directory: str):
+    def __init__(
+        self,
+        persist_directory: str,
+        ollama_base_url: str,
+        embedding_model: str = "nomic-embed-text"
+    ):
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
+        self.ollama_base_url = ollama_base_url
+        self.embedding_model = embedding_model
 
-        self.client = chromadb.PersistentClient(
-            path=str(self.persist_directory)
+        self.embedding_function = OllamaEmbeddingFunction(
+            base_url=ollama_base_url,
+            model=embedding_model
         )
 
-    def create_collection_for_pcap(self, pcap_id: str, delete_existing: bool = False) -> chromadb.Collection:
+        self.client = chromadb.PersistentClient(
+            path=str(self.persist_directory),
+            settings=Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
+            )
+        )
+
+    def create_collection_for_pcap(
+        self,
+        pcap_id: str,
+        delete_existing: bool = False
+    ) -> Collection:
         collection_name = f"pcap_{pcap_id}"
 
         if delete_existing:
             try:
                 self.client.delete_collection(name=collection_name)
+                print(f"Deleted existing collection: {collection_name}")
             except Exception:
                 pass
 
         try:
-            collection = self.client.get_collection(name=collection_name)
+            collection = self.client.get_collection(
+                name=collection_name,
+                embedding_function=self.embedding_function
+            )
+            print(f"Retrieved existing collection: {collection_name}")
             return collection
         except Exception:
             collection = self.client.create_collection(
                 name=collection_name,
-                metadata={"pcap_id": pcap_id}
+                metadata={
+                    "pcap_id": pcap_id,
+                    "embedding_model": self.embedding_model,
+                    "created_at": datetime.utcnow().isoformat(),
+                    "hnsw:space": "cosine",
+                    "hnsw:construction_ef": 200,
+                    "hnsw:M": 16,
+                    "hnsw:search_ef": 100
+                },
+                embedding_function=self.embedding_function
             )
+            print(f"Created new collection: {collection_name}")
             return collection
 
     def add_chunks_to_collection(
         self,
         collection_name: str,
-        chunks: List[Dict[str, Any]],
-        embeddings: List[List[float]]
+        chunks: List[Dict[str, Any]]
     ) -> bool:
         try:
-            collection = self.client.get_collection(name=collection_name)
+            collection = self.client.get_collection(
+                name=collection_name,
+                embedding_function=self.embedding_function
+            )
 
             documents = []
             metadatas = []
             ids = []
 
-            for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                if embedding is None:
-                    print(f"Warning: Skipping chunk {i} due to missing embedding")
-                    continue
-
+            for chunk in chunks:
                 doc_id = f"chunk_{chunk['chunk_index']}"
                 documents.append(chunk['chunk_text'])
 
@@ -71,13 +107,20 @@ class VectorStoreManager:
                 ids.append(doc_id)
 
             if documents:
-                collection.add(
-                    documents=documents,
-                    embeddings=embeddings[:len(documents)],
-                    metadatas=metadatas,
-                    ids=ids
-                )
-                print(f"Added {len(documents)} chunks to collection")
+                batch_size = 100
+                for i in range(0, len(documents), batch_size):
+                    batch_docs = documents[i:i + batch_size]
+                    batch_metas = metadatas[i:i + batch_size]
+                    batch_ids = ids[i:i + batch_size]
+
+                    collection.add(
+                        documents=batch_docs,
+                        metadatas=batch_metas,
+                        ids=batch_ids
+                    )
+                    print(f"Added batch {i//batch_size + 1}: {len(batch_docs)} chunks")
+
+                print(f"Successfully added {len(documents)} chunks to collection")
                 return True
             else:
                 print("No valid chunks to add")
@@ -90,17 +133,26 @@ class VectorStoreManager:
     def similarity_search(
         self,
         collection_name: str,
-        query_embedding: List[float],
-        n_results: int = 5
+        query_text: str,
+        n_results: int = 5,
+        where: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         try:
-            collection = self.client.get_collection(name=collection_name)
-
-            results = collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n_results,
-                include=['documents', 'metadatas', 'distances']
+            collection = self.client.get_collection(
+                name=collection_name,
+                embedding_function=self.embedding_function
             )
+
+            query_params = {
+                "query_texts": [query_text],
+                "n_results": n_results,
+                "include": ['documents', 'metadatas', 'distances']
+            }
+
+            if where:
+                query_params["where"] = where
+
+            results = collection.query(**query_params)
 
             formatted_results = {
                 'chunks': [],
@@ -122,10 +174,13 @@ class VectorStoreManager:
             print(f"Error during similarity search: {str(e)}")
             return {'chunks': [], 'count': 0}
 
-    def get_collection_by_pcap_id(self, pcap_id: str) -> Optional[chromadb.Collection]:
+    def get_collection_by_pcap_id(self, pcap_id: str) -> Optional[Collection]:
         collection_name = f"pcap_{pcap_id}"
         try:
-            return self.client.get_collection(name=collection_name)
+            return self.client.get_collection(
+                name=collection_name,
+                embedding_function=self.embedding_function
+            )
         except Exception:
             return None
 
@@ -147,10 +202,18 @@ class VectorStoreManager:
             print(f"Error deleting collection: {str(e)}")
             return False
 
-    def list_collections(self) -> List[str]:
+    def list_collections(self) -> List[Dict[str, Any]]:
         try:
             collections = self.client.list_collections()
-            return [col.name for col in collections]
+            result = []
+            for col in collections:
+                info = {
+                    'name': col.name,
+                    'count': col.count(),
+                    'metadata': col.metadata
+                }
+                result.append(info)
+            return result
         except Exception as e:
             print(f"Error listing collections: {str(e)}")
             return []
@@ -169,3 +232,43 @@ class VectorStoreManager:
         except Exception as e:
             print(f"Error getting collection stats: {str(e)}")
             return None
+
+    def cleanup_old_collections(self, days: int = 30) -> int:
+        try:
+            deleted_count = 0
+            cutoff_date = datetime.utcnow() - timedelta(days=days)
+            collections = self.client.list_collections()
+
+            for col in collections:
+                if col.metadata and 'created_at' in col.metadata:
+                    created_at = datetime.fromisoformat(col.metadata['created_at'])
+                    if created_at < cutoff_date:
+                        try:
+                            self.client.delete_collection(name=col.name)
+                            deleted_count += 1
+                            print(f"Deleted old collection: {col.name}")
+                        except Exception as e:
+                            print(f"Error deleting collection {col.name}: {str(e)}")
+
+            return deleted_count
+        except Exception as e:
+            print(f"Error during cleanup: {str(e)}")
+            return 0
+
+    def health_check(self) -> Dict[str, Any]:
+        try:
+            collections = self.client.list_collections()
+            total_vectors = sum(col.count() for col in collections)
+
+            return {
+                'status': 'healthy',
+                'collections_count': len(collections),
+                'total_vectors': total_vectors,
+                'persist_directory': str(self.persist_directory),
+                'embedding_model': self.embedding_model
+            }
+        except Exception as e:
+            return {
+                'status': 'unhealthy',
+                'error': str(e)
+            }

@@ -117,12 +117,9 @@ class AnalysisPipeline:
 
             print(f"Created {len(chunks)} chunks")
 
-            chunk_texts = [chunk['chunk_text'] for chunk in chunks]
-            embeddings = self.ollama.batch_embed_chunks(chunk_texts)
-
             print("Storing in vector database...")
             collection = self.vector_store.create_collection_for_pcap(analysis_id, delete_existing=True)
-            self.vector_store.add_chunks_to_collection(f"pcap_{analysis_id}", chunks, embeddings)
+            self.vector_store.add_chunks_to_collection(f"pcap_{analysis_id}", chunks)
 
             self.supabase.bulk_insert_chunks_metadata(analysis_id, chunks)
 

@@ -193,12 +193,20 @@ class SupabaseManager:
             if not chunks:
                 return True
 
+            import hashlib
+            vector_collection_name = f"pcap_{analysis_id}"
+
             records = []
             for chunk in chunks:
+                chunk_text = chunk['chunk_text']
+                chunk_hash = hashlib.sha256(chunk_text.encode()).hexdigest()
+
                 record = {
                     'analysis_id': analysis_id,
                     'chunk_index': chunk['chunk_index'],
-                    'chunk_text': chunk['chunk_text'],
+                    'vector_collection_name': vector_collection_name,
+                    'chunk_hash': chunk_hash,
+                    'chunk_size': len(chunk_text),
                     'ip_addresses': chunk['metadata'].get('ip_addresses', []),
                     'domains': chunk['metadata'].get('domains', []),
                     'timestamp_range': chunk['metadata'].get('timestamp_range', {})

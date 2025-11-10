@@ -15,6 +15,7 @@ from .modules.ollama_client import OllamaClient
 from .modules.vector_store import VectorStoreManager
 from .modules.pipeline import AnalysisPipeline
 from .modules.chat_handler import ChatHandler
+from .modules.cleanup_manager import CleanupManager
 
 app = FastAPI(title="PCAP LLM Analyzer", version="1.0.0")
 
@@ -33,7 +34,11 @@ ollama_client = OllamaClient(
     settings.ollama_embedding_model,
     settings.ollama_llm_model
 )
-vector_store = VectorStoreManager(str(settings.vector_db_dir))
+vector_store = VectorStoreManager(
+    persist_directory=str(settings.vector_db_dir),
+    ollama_base_url=settings.ollama_base_url,
+    embedding_model=settings.ollama_embedding_model
+)
 
 pipeline = AnalysisPipeline(
     supabase_manager=supabase_manager,
@@ -48,6 +53,13 @@ chat_handler = ChatHandler(
     ollama_client=ollama_client,
     vector_store=vector_store,
     supabase_manager=supabase_manager,
+    json_outputs_dir=str(settings.json_outputs_dir)
+)
+
+cleanup_manager = CleanupManager(
+    vector_store=vector_store,
+    supabase_manager=supabase_manager,
+    uploads_dir=str(settings.uploads_dir),
     json_outputs_dir=str(settings.json_outputs_dir)
 )
 
@@ -66,6 +78,10 @@ class ChatRequest(BaseModel):
     query: str
 
 
+class CleanupRequest(BaseModel):
+    days: Optional[int] = 30
+
+
 @app.get("/")
 async def read_root():
     index_file = frontend_dir / "index.html"
@@ -80,7 +96,8 @@ async def health_check():
         "api": "healthy",
         "supabase": "unknown",
         "ollama": "unknown",
-        "virustotal": "configured" if settings.virustotal_api_key else "not configured"
+        "virustotal": "configured" if settings.virustotal_api_key else "not configured",
+        "vector_store": "unknown"
     }
 
     try:
@@ -93,6 +110,9 @@ async def health_check():
         health_status["ollama"] = "healthy"
     else:
         health_status["ollama"] = "unreachable"
+
+    vector_health = vector_store.health_check()
+    health_status["vector_store"] = vector_health
 
     return health_status
 
@@ -298,6 +318,65 @@ async def get_chat_history(analysis_id: str):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting chat history: {str(e)}")
+
+
+@app.post("/admin/cleanup")
+async def cleanup_old_data(days: int = 30):
+    try:
+        results = cleanup_manager.cleanup_old_analyses(days)
+        return JSONResponse(results)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error during cleanup: {str(e)}")
+
+
+@app.post("/admin/cleanup/failed")
+async def cleanup_failed():
+    try:
+        results = cleanup_manager.cleanup_failed_analyses()
+        return JSONResponse(results)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error cleaning failed analyses: {str(e)}")
+
+
+@app.post("/admin/vacuum")
+async def vacuum_vector_db():
+    try:
+        results = cleanup_manager.vacuum_vector_database()
+        return JSONResponse(results)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error vacuuming vector database: {str(e)}")
+
+
+@app.get("/admin/storage/stats")
+async def get_storage_stats():
+    try:
+        stats = cleanup_manager.get_storage_stats()
+        return JSONResponse(stats)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting storage stats: {str(e)}")
+
+
+@app.delete("/analysis/{analysis_id}")
+async def delete_analysis(analysis_id: str):
+    try:
+        success = cleanup_manager.delete_specific_analysis(analysis_id)
+        if success:
+            return JSONResponse({"message": "Analysis deleted successfully", "analysis_id": analysis_id})
+        else:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting analysis: {str(e)}")
+
+
+@app.get("/admin/collections")
+async def list_collections():
+    try:
+        collections = vector_store.list_collections()
+        return JSONResponse({"collections": collections})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing collections: {str(e)}")
 
 
 if __name__ == "__main__":

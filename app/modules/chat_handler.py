@@ -106,18 +106,10 @@ class ChatHandler:
                     'message': 'Vector collection not found for this analysis'
                 }
 
-            print("Generating query embedding...")
-            query_embedding = self.ollama.generate_embeddings(query)
-            if not query_embedding:
-                return {
-                    'status': 'error',
-                    'message': 'Failed to generate query embedding'
-                }
-
             print("Performing similarity search...")
             search_results = self.vector_store.similarity_search(
                 collection_name=f"pcap_{analysis_id}",
-                query_embedding=query_embedding,
+                query_text=query,
                 n_results=top_k
             )
 
