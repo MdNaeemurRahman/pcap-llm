@@ -304,6 +304,22 @@ class ChatHandler:
                     'mode': 'option3'
                 }
 
+            # Handle summary-based responses
+            if result.get('answered_from_summary'):
+                response = result.get('response')
+                self.supabase.insert_chat_message(
+                    analysis_id=analysis_id,
+                    user_query=query,
+                    llm_response=response,
+                    retrieved_chunks={'source': 'summary_data'}
+                )
+                return {
+                    'status': 'success',
+                    'response': response,
+                    'mode': 'option3',
+                    'answered_from_summary': True
+                }
+
             if result.get('suggestion_only'):
                 response = f"**TShark Command Suggestion:**\n\n```bash\n{result['suggested_command']}\n```\n\n**Explanation:**\n{result['explanation']}"
                 self.supabase.insert_chat_message(

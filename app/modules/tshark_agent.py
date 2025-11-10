@@ -44,6 +44,89 @@ class TSharkAgent:
         query_lower = query.lower().strip()
         return any(greeting == query_lower or query_lower.startswith(greeting) for greeting in greetings) and len(query.split()) <= 3
 
+    def _can_answer_from_summary(self, query: str, pcap_summary: Dict[str, Any]) -> Optional[str]:
+        """Check if query can be answered directly from summary data without TShark execution."""
+        query_lower = query.lower()
+
+        if any(phrase in query_lower for phrase in ['which ip', 'what ip', 'malicious ip', 'suspicious ip', 'bad ip']):
+            vt_results = pcap_summary.get('virustotal_results', {})
+            flagged_entities = vt_results.get('flagged_entities', [])
+            malicious_ips = [e for e in flagged_entities if e.get('entity_type') == 'ip' and e.get('malicious_count', 0) > 0]
+
+            if malicious_ips:
+                response_parts = [f"Based on VirusTotal threat intelligence, I found {len(malicious_ips)} malicious IP address(es) in this capture:\n"]
+                for entity in malicious_ips[:10]:
+                    ip = entity.get('entity_value', 'Unknown')
+                    mal_count = entity.get('malicious_count', 0)
+                    total_engines = mal_count + entity.get('harmless_count', 0)
+                    response_parts.append(f"- **{ip}**: Flagged by {mal_count}/{total_engines} security vendors")
+                    if entity.get('threat_label'):
+                        response_parts.append(f"  - Threat Type: {entity['threat_label']}")
+
+                return "\n".join(response_parts)
+            else:
+                return "Based on VirusTotal analysis, no malicious IP addresses were detected in this capture."
+
+        if any(phrase in query_lower for phrase in ['malicious domain', 'suspicious domain', 'bad domain', 'which domain']):
+            vt_results = pcap_summary.get('virustotal_results', {})
+            flagged_entities = vt_results.get('flagged_entities', [])
+            malicious_domains = [e for e in flagged_entities if e.get('entity_type') == 'domain' and e.get('malicious_count', 0) > 0]
+
+            if malicious_domains:
+                response_parts = [f"Based on VirusTotal threat intelligence, I found {len(malicious_domains)} malicious domain(s) in this capture:\n"]
+                for entity in malicious_domains[:10]:
+                    domain = entity.get('entity_value', 'Unknown')
+                    mal_count = entity.get('malicious_count', 0)
+                    response_parts.append(f"- **{domain}**: Flagged by {mal_count} security vendors")
+
+                return "\n".join(response_parts)
+            else:
+                return "Based on VirusTotal analysis, no malicious domains were detected in this capture."
+
+        if any(phrase in query_lower for phrase in ['how many packet', 'total packet', 'packet count']):
+            stats = pcap_summary.get('statistics', {})
+            total = stats.get('total_packets', 'Unknown')
+            return f"This PCAP file contains **{total:,}** packets." if isinstance(total, int) else f"This PCAP file contains {total} packets."
+
+        if any(phrase in query_lower for phrase in ['what protocol', 'which protocol', 'top protocol']):
+            stats = pcap_summary.get('statistics', {})
+            protocols = stats.get('top_protocols', {})
+            if protocols:
+                response_parts = ["The most common protocols in this capture are:\n"]
+                for proto, count in list(protocols.items())[:5]:
+                    response_parts.append(f"- **{proto}**: {count:,} packets")
+                return "\n".join(response_parts)
+
+        if any(phrase in query_lower for phrase in ['overall threat', 'threat summary', 'security summary', 'any threat']):
+            vt_results = pcap_summary.get('virustotal_results', {})
+            if vt_results:
+                summary = vt_results.get('summary', {})
+                mal_count = summary.get('malicious_entities', 0)
+                sus_count = summary.get('suspicious_entities', 0)
+
+                if mal_count > 0 or sus_count > 0:
+                    response = f"**Threat Intelligence Summary:**\n\n"
+                    response += f"- **{mal_count}** malicious entities detected\n"
+                    response += f"- **{sus_count}** suspicious entities detected\n\n"
+
+                    flagged = vt_results.get('flagged_entities', [])
+                    mal_ips = len([e for e in flagged if e.get('entity_type') == 'ip' and e.get('malicious_count', 0) > 0])
+                    mal_domains = len([e for e in flagged if e.get('entity_type') == 'domain' and e.get('malicious_count', 0) > 0])
+                    mal_files = len([e for e in flagged if e.get('entity_type') == 'file' and e.get('malicious_count', 0) > 0])
+
+                    if mal_ips > 0:
+                        response += f"- {mal_ips} malicious IP address(es)\n"
+                    if mal_domains > 0:
+                        response += f"- {mal_domains} malicious domain(s)\n"
+                    if mal_files > 0:
+                        response += f"- {mal_files} malicious file hash(es)\n"
+
+                    return response
+                else:
+                    return "Based on VirusTotal analysis, no significant threats were detected in this capture."
+
+        return None
+
     def get_tshark_reference_prompt(self) -> str:
         return """You are an expert network security analyst with deep knowledge of TShark and Wireshark display filters.
 
@@ -231,10 +314,36 @@ Remember: Only use -Y for display filters, return JSON format response."""
 
         # Handle simple greetings
         if self._is_greeting(user_query):
+            stats = pcap_summary.get('statistics', {})
+            vt_results = pcap_summary.get('virustotal_results', {})
+            vt_summary = vt_results.get('summary', {}) if vt_results else {}
+
+            greeting = "Hello! I'm your AI security analyst. I can help you investigate this PCAP file by running dynamic analysis on the network traffic.\n\n"
+            greeting += f"**Quick Overview:**\n"
+            greeting += f"- Total packets: {stats.get('total_packets', 'Unknown')}\n"
+            greeting += f"- Unique IPs: {stats.get('unique_ips_count', 'Unknown')}\n"
+
+            if vt_summary:
+                mal_count = vt_summary.get('malicious_entities', 0)
+                if mal_count > 0:
+                    greeting += f"- ⚠️ {mal_count} malicious entities detected by VirusTotal\n"
+
+            greeting += "\nWhat would you like to know about the captured packets?"
+
             return {
                 'success': True,
                 'is_greeting': True,
-                'response': "Hello! I'm your AI security analyst. I can help you investigate this PCAP file by running dynamic analysis on the network traffic. What would you like to know about the captured packets?"
+                'response': greeting
+            }
+
+        # Try to answer from summary data first
+        summary_response = self._can_answer_from_summary(user_query, pcap_summary)
+        if summary_response:
+            return {
+                'success': True,
+                'response': summary_response,
+                'mode': 'option3',
+                'answered_from_summary': True
             }
 
         command_plan_result = self.analyze_query_and_generate_commands(
@@ -312,13 +421,45 @@ Remember: Only use -Y for display filters, return JSON format response."""
 
     def _build_context(self, pcap_summary: Dict[str, Any]) -> str:
         context_parts = []
-        context_parts.append(f"Total Packets: {pcap_summary.get('statistics', {}).get('total_packets', 'Unknown')}")
-        context_parts.append(f"Unique IPs: {pcap_summary.get('statistics', {}).get('unique_ips_count', 'Unknown')}")
-        context_parts.append(f"Unique Domains: {pcap_summary.get('statistics', {}).get('unique_domains_count', 'Unknown')}")
 
-        protocols = pcap_summary.get('statistics', {}).get('top_protocols', {})
+        context_parts.append("=== PCAP FILE SUMMARY ===")
+        stats = pcap_summary.get('statistics', {})
+        context_parts.append(f"Total Packets: {stats.get('total_packets', 'Unknown')}")
+        context_parts.append(f"Unique IPs: {stats.get('unique_ips_count', 'Unknown')}")
+        context_parts.append(f"Unique Domains: {stats.get('unique_domains_count', 'Unknown')}")
+
+        protocols = stats.get('top_protocols', {})
         if protocols:
-            context_parts.append(f"Top Protocols: {', '.join([f'{k}({v})' for k, v in list(protocols.items())[:5]])}")
+            context_parts.append(f"\nTop Protocols: {', '.join([f'{k}({v})' for k, v in list(protocols.items())[:5]])}")
+
+        if 'virustotal_results' in pcap_summary:
+            vt_summary = pcap_summary['virustotal_results'].get('summary', {})
+            context_parts.append("\n=== THREAT INTELLIGENCE (VirusTotal) ===")
+            context_parts.append(f"Total Entities Queried: {vt_summary.get('total_queried', 0)}")
+            context_parts.append(f"Malicious Entities: {vt_summary.get('malicious_entities', 0)}")
+            context_parts.append(f"Suspicious Entities: {vt_summary.get('suspicious_entities', 0)}")
+
+            flagged_entities = pcap_summary['virustotal_results'].get('flagged_entities', [])
+            if flagged_entities:
+                malicious_ips = [e for e in flagged_entities if e.get('entity_type') == 'ip' and e.get('malicious_count', 0) > 0]
+                malicious_domains = [e for e in flagged_entities if e.get('entity_type') == 'domain' and e.get('malicious_count', 0) > 0]
+                malicious_files = [e for e in flagged_entities if e.get('entity_type') == 'file' and e.get('malicious_count', 0) > 0]
+
+                if malicious_ips:
+                    context_parts.append(f"\nMalicious IPs ({len(malicious_ips)}): {', '.join([e['entity_value'] for e in malicious_ips[:5]])}")
+                if malicious_domains:
+                    context_parts.append(f"Malicious Domains ({len(malicious_domains)}): {', '.join([e['entity_value'] for e in malicious_domains[:5]])}")
+                if malicious_files:
+                    context_parts.append(f"Malicious File Hashes ({len(malicious_files)}): {len(malicious_files)} detected")
+
+        top_flows = pcap_summary.get('top_flows', {})
+        if top_flows:
+            context_parts.append(f"\n=== TOP NETWORK FLOWS ===")
+            for flow, metadata in list(top_flows.items())[:5]:
+                if isinstance(metadata, dict):
+                    context_parts.append(f"{flow}: {metadata.get('packet_count', 0)} packets")
+                else:
+                    context_parts.append(f"{flow}: {metadata} packets")
 
         return '\n'.join(context_parts)
 

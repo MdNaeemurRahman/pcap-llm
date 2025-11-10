@@ -169,19 +169,59 @@
         }
 
         .chat-messages {
-            height: 400px;
+            height: 550px;
+            min-height: 300px;
+            max-height: 80vh;
             overflow-y: auto;
             border: 1px solid #e0e0e0;
-            border-radius: 6px;
+            border-radius: 6px 6px 0 0;
             padding: 15px;
             background: white;
+            margin-bottom: 0;
+            position: relative;
+            scroll-behavior: smooth;
+        }
+
+        .chat-resize-handle {
+            height: 8px;
+            background: #f0f0f0;
+            border: 1px solid #e0e0e0;
+            border-top: none;
+            border-radius: 0 0 6px 6px;
+            cursor: ns-resize;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
             margin-bottom: 15px;
+            user-select: none;
+        }
+
+        .chat-resize-handle:hover {
+            background: #e0e0e0;
+        }
+
+        .chat-resize-handle::before {
+            content: '';
+            width: 40px;
+            height: 3px;
+            background: #ccc;
+            border-radius: 2px;
+        }
+
+        .chat-resize-handle:hover::before {
+            background: #999;
+        }
+
+        .chat-messages-wrapper {
+            position: relative;
         }
 
         .message {
-            margin-bottom: 15px;
-            padding: 12px;
-            border-radius: 6px;
+            margin-bottom: 20px;
+            padding: 15px;
+            border-radius: 8px;
+            line-height: 1.6;
         }
 
         .message.user {
@@ -198,9 +238,21 @@
             word-wrap: break-word;
         }
 
+        .message.assistant p {
+            margin: 10px 0;
+        }
+
+        .message.assistant p:first-child {
+            margin-top: 0;
+        }
+
+        .message.assistant p:last-child {
+            margin-bottom: 0;
+        }
+
         .message strong {
             display: block;
-            margin-bottom: 5px;
+            margin-bottom: 8px;
             font-size: 0.9em;
             opacity: 0.8;
         }
@@ -232,6 +284,26 @@
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message {
+            animation: fadeIn 0.3s ease-out;
+        }
+
+        .message.temp {
+            opacity: 0.6;
+            font-style: italic;
         }
 
         .stats-grid {
@@ -300,12 +372,18 @@
 
         .message.assistant ul,
         .message.assistant ol {
-            margin: 10px 0;
+            margin: 15px 0;
             padding-left: 25px;
+            line-height: 1.8;
         }
 
         .message.assistant li {
-            margin: 5px 0;
+            margin: 8px 0;
+        }
+
+        .message.assistant ul ul,
+        .message.assistant ol ol {
+            margin: 8px 0;
         }
 
         .message.assistant blockquote {
@@ -487,7 +565,10 @@
         <div class="chat-container" id="chatContainer">
             <div class="section">
                 <h2>Chat with AI Analyst</h2>
-                <div class="chat-messages" id="chatMessages"></div>
+                <div class="chat-messages-wrapper">
+                    <div class="chat-messages" id="chatMessages"></div>
+                    <div class="chat-resize-handle" id="chatResizeHandle"></div>
+                </div>
                 <div class="chat-input-container">
                     <input type="text" id="chatInput" placeholder="Ask about the network traffic...">
                     <button class="btn" id="sendBtn">Send</button>
@@ -530,6 +611,50 @@
         const deleteBtn = document.getElementById('deleteBtn');
         const option3Radio = document.getElementById('option3Radio');
         const tsharkWarning = document.getElementById('tsharkWarning');
+        const chatResizeHandle = document.getElementById('chatResizeHandle');
+
+        // Load saved chat height from localStorage
+        const savedChatHeight = localStorage.getItem('chatHeight');
+        if (savedChatHeight) {
+            chatMessages.style.height = savedChatHeight + 'px';
+        }
+
+        // Implement chat resize functionality
+        let isResizing = false;
+        let startY = 0;
+        let startHeight = 0;
+
+        chatResizeHandle.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            startY = e.clientY;
+            startHeight = chatMessages.offsetHeight;
+            document.body.style.cursor = 'ns-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizing) return;
+
+            const delta = e.clientY - startY;
+            const newHeight = startHeight + delta;
+            const minHeight = 300;
+            const maxHeight = window.innerHeight * 0.8;
+
+            if (newHeight >= minHeight && newHeight <= maxHeight) {
+                chatMessages.style.height = newHeight + 'px';
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isResizing) {
+                isResizing = false;
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                // Save the height to localStorage
+                localStorage.setItem('chatHeight', chatMessages.offsetHeight);
+            }
+        });
 
         uploadZone.addEventListener('click', () => fileInput.click());
 
@@ -802,8 +927,16 @@
             addMessage('user', query);
             chatInput.value = '';
             sendBtn.disabled = true;
+            chatInput.disabled = true;
 
-            addMessage('assistant', 'Analyzing...', true);
+            const loadingMessages = [
+                'Analyzing your query...',
+                'Investigating network traffic...',
+                'Processing security analysis...',
+                'Examining packet data...'
+            ];
+            const randomLoading = loadingMessages[Math.floor(Math.random() * loadingMessages.length)];
+            addMessage('assistant', randomLoading + ' <span class="loader"></span>', true);
 
             try {
                 const response = await fetch('/chat', {
@@ -831,6 +964,8 @@
                 addMessage('assistant', `Error: ${error.message}`);
             } finally {
                 sendBtn.disabled = false;
+                chatInput.disabled = false;
+                chatInput.focus();
             }
         }
 
