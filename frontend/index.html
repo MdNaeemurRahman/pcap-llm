@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PCAP LLM Analyzer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2em;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 0.95em;
+        }
+
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            background: #f9f9f9;
+        }
+
+        .section h2 {
+            color: #444;
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+
+        .upload-zone {
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            background: white;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .upload-zone:hover {
+            border-color: #764ba2;
+            background: #f0f0f0;
+        }
+
+        .upload-zone.dragover {
+            border-color: #764ba2;
+            background: #e8e8ff;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .btn {
+            background: #667eea;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.3s;
+            margin: 5px;
+        }
+
+        .btn:hover {
+            background: #764ba2;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .mode-selector {
+            margin: 20px 0;
+        }
+
+        .mode-selector label {
+            display: block;
+            margin: 10px 0;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            cursor: pointer;
+            background: white;
+            transition: all 0.3s;
+        }
+
+        .mode-selector input[type="radio"] {
+            margin-right: 10px;
+        }
+
+        .mode-selector label:hover {
+            border-color: #667eea;
+        }
+
+        .mode-selector input[type="radio"]:checked + span {
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .status-box {
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            font-weight: 500;
+        }
+
+        .status-box.info {
+            background: #e3f2fd;
+            color: #1976d2;
+            border-left: 4px solid #1976d2;
+        }
+
+        .status-box.success {
+            background: #e8f5e9;
+            color: #388e3c;
+            border-left: 4px solid #388e3c;
+        }
+
+        .status-box.error {
+            background: #ffebee;
+            color: #d32f2f;
+            border-left: 4px solid #d32f2f;
+        }
+
+        .status-box.warning {
+            background: #fff3e0;
+            color: #f57c00;
+            border-left: 4px solid #f57c00;
+        }
+
+        .chat-container {
+            display: none;
+            margin-top: 20px;
+        }
+
+        .chat-messages {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 15px;
+            background: white;
+            margin-bottom: 15px;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            padding: 12px;
+            border-radius: 6px;
+        }
+
+        .message.user {
+            background: #667eea;
+            color: white;
+            margin-left: 20%;
+        }
+
+        .message.assistant {
+            background: #f0f0f0;
+            color: #333;
+            margin-right: 20%;
+        }
+
+        .message strong {
+            display: block;
+            margin-bottom: 5px;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+
+        .chat-input-container {
+            display: flex;
+            gap: 10px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            font-size: 1em;
+        }
+
+        .loader {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-left: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #667eea;
+        }
+
+        .stat-card .label {
+            color: #666;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+
+        .stat-card .value {
+            color: #333;
+            font-size: 1.5em;
+            font-weight: bold;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PCAP LLM Analyzer</h1>
+        <p class="subtitle">Upload and analyze network traffic captures with AI-powered insights</p>
+
+        <div class="section">
+            <h2>Step 1: Upload PCAP File</h2>
+            <div class="upload-zone" id="uploadZone">
+                <p>Click to select a PCAP file or drag and drop here</p>
+                <p style="color: #999; font-size: 0.9em; margin-top: 10px;">Supported: .pcap, .pcapng, .cap</p>
+                <input type="file" id="fileInput" accept=".pcap,.pcapng,.cap">
+            </div>
+            <div id="uploadStatus"></div>
+        </div>
+
+        <div class="section" id="analysisSection" style="display: none;">
+            <h2>Step 2: Select Analysis Mode</h2>
+            <div class="mode-selector">
+                <label>
+                    <input type="radio" name="mode" value="option1" checked>
+                    <span><strong>Option 1: Summary Chat</strong> - Fast analysis with summary data. Perfect for quick threat assessment and overview.</span>
+                </label>
+                <label>
+                    <input type="radio" name="mode" value="option2">
+                    <span><strong>Option 2: Full Context Chat</strong> - Deep analysis with RAG. Enables detailed packet-level queries and comprehensive investigation.</span>
+                </label>
+            </div>
+            <button class="btn" id="analyzeBtn">Start Analysis</button>
+            <div id="analysisStatus"></div>
+        </div>
+
+        <div class="section hidden" id="statsSection">
+            <h2>Analysis Statistics</h2>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="label">Total Packets</div>
+                    <div class="value" id="statPackets">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Unique IPs</div>
+                    <div class="value" id="statIPs">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Unique Domains</div>
+                    <div class="value" id="statDomains">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="label">Status</div>
+                    <div class="value" id="statStatus">-</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-container" id="chatContainer">
+            <div class="section">
+                <h2>Chat with AI Analyst</h2>
+                <div class="chat-messages" id="chatMessages"></div>
+                <div class="chat-input-container">
+                    <input type="text" id="chatInput" placeholder="Ask about the network traffic...">
+                    <button class="btn" id="sendBtn">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentAnalysisId = null;
+        let currentFileHash = null;
+        let statusCheckInterval = null;
+
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const uploadStatus = document.getElementById('uploadStatus');
+        const analysisSection = document.getElementById('analysisSection');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const analysisStatus = document.getElementById('analysisStatus');
+        const chatContainer = document.getElementById('chatContainer');
+        const chatMessages = document.getElementById('chatMessages');
+        const chatInput = document.getElementById('chatInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statsSection = document.getElementById('statsSection');
+
+        uploadZone.addEventListener('click', () => fileInput.click());
+
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                fileInput.files = e.dataTransfer.files;
+                handleFileUpload();
+            }
+        });
+
+        fileInput.addEventListener('change', handleFileUpload);
+
+        async function handleFileUpload() {
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            uploadStatus.innerHTML = '<div class="status-box info">Uploading file...</div>';
+
+            try {
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    if (result.existing) {
+                        uploadStatus.innerHTML = '<div class="status-box warning">This PCAP has already been analyzed!</div>';
+                        currentAnalysisId = result.analysis_id;
+                        loadExistingAnalysis(result.analysis_id);
+                    } else {
+                        uploadStatus.innerHTML = `<div class="status-box success">File uploaded successfully: ${result.filename}</div>`;
+                        currentFileHash = result.file_hash;
+                        analysisSection.style.display = 'block';
+                    }
+                } else {
+                    uploadStatus.innerHTML = `<div class="status-box error">Upload failed: ${result.detail}</div>`;
+                }
+            } catch (error) {
+                uploadStatus.innerHTML = `<div class="status-box error">Error: ${error.message}</div>`;
+            }
+        }
+
+        analyzeBtn.addEventListener('click', async () => {
+            const mode = document.querySelector('input[name="mode"]:checked').value;
+
+            if (!currentFileHash) {
+                analysisStatus.innerHTML = '<div class="status-box error">Please upload a file first</div>';
+                return;
+            }
+
+            analyzeBtn.disabled = true;
+            analysisStatus.innerHTML = '<div class="status-box info">Starting analysis... <span class="loader"></span></div>';
+
+            try {
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        analysis_id: currentFileHash,
+                        mode: mode
+                    })
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    currentAnalysisId = result.analysis_id;
+                    analysisStatus.innerHTML = `<div class="status-box info">Analysis in progress (${mode})... <span class="loader"></span></div>`;
+                    startStatusPolling();
+                } else {
+                    analysisStatus.innerHTML = `<div class="status-box error">Analysis failed: ${result.detail}</div>`;
+                    analyzeBtn.disabled = false;
+                }
+            } catch (error) {
+                analysisStatus.innerHTML = `<div class="status-box error">Error: ${error.message}</div>`;
+                analyzeBtn.disabled = false;
+            }
+        });
+
+        function startStatusPolling() {
+            if (statusCheckInterval) clearInterval(statusCheckInterval);
+
+            statusCheckInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/status/${currentAnalysisId}`);
+                    const result = await response.json();
+
+                    updateStats(result);
+
+                    if (result.status === 'ready') {
+                        clearInterval(statusCheckInterval);
+                        analysisStatus.innerHTML = '<div class="status-box success">Analysis complete! You can now chat with the AI analyst.</div>';
+                        chatContainer.style.display = 'block';
+                        statsSection.classList.remove('hidden');
+                        analyzeBtn.disabled = false;
+                    } else if (result.status === 'failed') {
+                        clearInterval(statusCheckInterval);
+                        analysisStatus.innerHTML = '<div class="status-box error">Analysis failed. Please try again.</div>';
+                        analyzeBtn.disabled = false;
+                    }
+                } catch (error) {
+                    console.error('Status check error:', error);
+                }
+            }, 3000);
+        }
+
+        function updateStats(data) {
+            document.getElementById('statPackets').textContent = data.total_packets || '-';
+            document.getElementById('statIPs').textContent = data.unique_ips_count || '-';
+            document.getElementById('statDomains').textContent = data.unique_domains_count || '-';
+            document.getElementById('statStatus').textContent = data.status || '-';
+        }
+
+        async function loadExistingAnalysis(analysisId) {
+            try {
+                const response = await fetch(`/status/${analysisId}`);
+                const result = await response.json();
+
+                analysisSection.style.display = 'none';
+                updateStats(result);
+                statsSection.classList.remove('hidden');
+
+                if (result.status === 'ready') {
+                    chatContainer.style.display = 'block';
+                    loadChatHistory(analysisId);
+                } else if (result.status === 'failed') {
+                    uploadStatus.innerHTML += '<div class="status-box error">Previous analysis failed.</div>';
+                } else {
+                    uploadStatus.innerHTML += '<div class="status-box info">Previous analysis in progress...</div>';
+                    startStatusPolling();
+                }
+            } catch (error) {
+                console.error('Error loading existing analysis:', error);
+            }
+        }
+
+        async function loadChatHistory(analysisId) {
+            try {
+                const response = await fetch(`/analysis/${analysisId}/chat_history`);
+                const result = await response.json();
+
+                if (result.history && result.history.length > 0) {
+                    result.history.forEach(msg => {
+                        addMessage('user', msg.user_query);
+                        addMessage('assistant', msg.llm_response);
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading chat history:', error);
+            }
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        chatInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        async function sendMessage() {
+            const query = chatInput.value.trim();
+            if (!query || !currentAnalysisId) return;
+
+            addMessage('user', query);
+            chatInput.value = '';
+            sendBtn.disabled = true;
+
+            addMessage('assistant', 'Analyzing...', true);
+
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        analysis_id: currentAnalysisId,
+                        query: query
+                    })
+                });
+
+                const result = await response.json();
+
+                const tempMessages = chatMessages.querySelectorAll('.temp');
+                tempMessages.forEach(msg => msg.remove());
+
+                if (response.ok) {
+                    addMessage('assistant', result.response);
+                } else {
+                    addMessage('assistant', `Error: ${result.detail}`);
+                }
+            } catch (error) {
+                const tempMessages = chatMessages.querySelectorAll('.temp');
+                tempMessages.forEach(msg => msg.remove());
+                addMessage('assistant', `Error: ${error.message}`);
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        function addMessage(role, content, isTemp = false) {
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${role}${isTemp ? ' temp' : ''}`;
+            messageDiv.innerHTML = `<strong>${role === 'user' ? 'You' : 'AI Analyst'}</strong>${content}`;
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+    </script>
+</body>
+</html>
