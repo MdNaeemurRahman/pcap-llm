@@ -275,7 +275,16 @@ class ChatHandler:
                 pcap_file_path=pcap_file_path
             )
 
-            if not result['success']:
+            # Validate result structure
+            if not isinstance(result, dict):
+                print(f"[Option 3] Unexpected result type: {type(result)}")
+                return {
+                    'status': 'error',
+                    'message': 'Unexpected response format from analysis engine',
+                    'mode': 'option3'
+                }
+
+            if not result.get('success', False):
                 error_response = result.get('error', 'Unknown error occurred')
                 self.supabase.insert_chat_message(
                     analysis_id=analysis_id,

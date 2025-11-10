@@ -263,7 +263,11 @@ Be precise, security-focused, and helpful."""
         context = self._build_context(pcap_summary)
 
         if self._is_command_suggestion_request(user_query):
-            return self._handle_command_suggestion(user_query, context)
+            suggestion_result = self._handle_command_suggestion(user_query, context)
+            # Ensure success key is present
+            if 'success' not in suggestion_result:
+                suggestion_result['success'] = True
+            return suggestion_result
 
         prompt = f"""{self.get_tshark_reference_prompt()}
 
@@ -287,9 +291,17 @@ Remember: Only use -Y for display filters, return JSON format response."""
             command_plan = self._parse_llm_response(response)
 
             if not command_plan:
+                print(f"[TShark Agent] Failed to parse LLM response. Raw response: {response[:500]}")
                 return {
                     'success': False,
                     'error': 'Failed to parse LLM response into command plan'
+                }
+
+            # Validate command_plan structure
+            if not isinstance(command_plan, dict):
+                return {
+                    'success': False,
+                    'error': f'Command plan is not a dictionary: {type(command_plan)}'
                 }
 
             return {
@@ -299,6 +311,9 @@ Remember: Only use -Y for display filters, return JSON format response."""
             }
 
         except Exception as e:
+            print(f"[TShark Agent] Exception in analyze_query_and_generate_commands: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {
                 'success': False,
                 'error': f'Error generating commands: {str(e)}'
@@ -350,10 +365,18 @@ Remember: Only use -Y for display filters, return JSON format response."""
             user_query, pcap_summary, pcap_file_path
         )
 
-        if not command_plan_result['success']:
+        # Safely check for success key with defensive handling
+        if not command_plan_result.get('success', False):
             return command_plan_result
 
-        command_plan = command_plan_result['command_plan']
+        command_plan = command_plan_result.get('command_plan')
+
+        # Validate command_plan exists
+        if not command_plan:
+            return {
+                'success': False,
+                'error': 'No command plan generated from query analysis'
+            }
 
         if command_plan.get('command_suggestion_only'):
             suggested_cmd = sanitize_paths(command_plan.get('suggested_command', ''))
@@ -466,7 +489,9 @@ Remember: Only use -Y for display filters, return JSON format response."""
     def _is_command_suggestion_request(self, query: str) -> bool:
         suggestion_patterns = [
             'what command', 'which command', 'tshark command',
-            'how do i', 'how to', 'what filter', 'show me the command'
+            'how do i', 'how to', 'what filter', 'show me the command',
+            'what command can i run', 'which command should i run',
+            'how can i run', 'command to see', 'tshark to see'
         ]
         query_lower = query.lower()
         return any(pattern in query_lower for pattern in suggestion_patterns)
@@ -495,7 +520,19 @@ Return JSON with:
                 system_prompt="You are a TShark expert. Provide command suggestions in JSON format."
             )
 
-            return self._parse_llm_response(response)
+            parsed = self._parse_llm_response(response)
+
+            if parsed is None:
+                return {
+                    'success': False,
+                    'error': 'Failed to parse LLM response for command suggestion'
+                }
+
+            # Add success flag if not present
+            if 'success' not in parsed:
+                parsed['success'] = True
+
+            return parsed
 
         except Exception as e:
             return {
@@ -507,11 +544,22 @@ Return JSON with:
         try:
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
+                parsed = json.loads(json_match.group())
+            else:
+                parsed = json.loads(response)
 
-            return json.loads(response)
-        except json.JSONDecodeError:
+            # Validate that parsed response is a dictionary
+            if not isinstance(parsed, dict):
+                print(f"Parsed response is not a dictionary: {type(parsed)}")
+                return None
+
+            return parsed
+        except json.JSONDecodeError as e:
             print(f"Failed to parse LLM response as JSON: {response[:200]}")
+            print(f"JSON decode error: {str(e)}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error parsing LLM response: {str(e)}")
             return None
 
     def _interpret_results(
@@ -558,19 +606,31 @@ Provide a professional, conversational response that:
 3. Highlights security-relevant findings and their implications
 4. Provides actionable context and recommendations when appropriate
 
-**RESPONSE STYLE:**
+**CRITICAL RESPONSE STYLE RULES:**
 - Be conversational and natural, like talking to a colleague
-- Match your response length to the question complexity (simple question = brief answer)
-- Focus on INSIGHTS and ANALYSIS, not raw data
+- Match response length to question complexity:
+  * Simple query ("find IP X") = 2-4 sentences
+  * Moderate query = 1 paragraph (5-7 sentences)
+  * Complex investigation = 2 paragraphs maximum
+- Focus on INSIGHTS and ANALYSIS, not raw data dumps
 - Use specific evidence (IPs, timestamps, packet counts) naturally in your explanation
-- Don't mention "commands", "analysis steps", or technical execution details
+- NEVER mention "commands", "tshark", "analysis steps", "filters", or technical execution details
 - Present findings as if you directly analyzed the traffic yourself
+- Avoid phrases like "based on the analysis" or "the results show" - just state your findings
 
-**EXAMPLE GOOD RESPONSE:**
-"I found several connections involving IP 192.168.1.100. This host communicated with 15 external servers, primarily using HTTPS on port 443. The majority of traffic occurred between 14:30 and 16:45, with a total of 2,847 packets exchanged. The connections appear to be standard web browsing activity with no immediate security concerns."
+**GOOD RESPONSE EXAMPLES:**
 
-**EXAMPLE BAD RESPONSE:**
-"Based on the TShark command execution, Analysis 1 shows... Command output indicates... The results from the filter show..."
+Example 1 (Simple query: "find communication session of this ip 192.254.225.136"):
+"I found 247 packets involving IP 192.254.225.136 across 8 different communication sessions. This host primarily communicated with two external servers (203.0.113.45 and 198.51.100.78) using HTTPS on port 443. The connections occurred between 14:30 and 15:45 UTC, exchanging approximately 1.2 MB of data. This appears to be standard web application traffic with no immediate security concerns."
+
+Example 2 (Command query: "what command can i run to see this output?"):
+"To see this information yourself, you can run: `tshark -r file.pcap -Y 'ip.addr == 192.254.225.136'`. This filter will show all packets involving that specific IP address. If you want more detailed output, add `-T json` for structured data or `-T fields -e ip.src -e ip.dst` to extract specific fields."
+
+**BAD RESPONSE EXAMPLES (DO NOT DO THIS):**
+- "Based on the TShark command execution, Analysis 1 shows..."
+- "The command output indicates that the filter returned..."
+- "After running the display filter, the results show..."
+- "The analysis executed successfully and found..."
 
 Provide your analysis now:"""
 
