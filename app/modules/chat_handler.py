@@ -4,6 +4,7 @@ from typing import Dict, List, Any, Optional
 from .ollama_client import OllamaClient
 from .vector_store import VectorStoreManager
 from .supabase_client import SupabaseManager
+from .query_classifier import QueryClassifier
 class ChatHandler:
     def __init__(
         self,
@@ -16,6 +17,7 @@ class ChatHandler:
         self.vector_store = vector_store
         self.supabase = supabase_manager
         self.json_outputs_dir = Path(json_outputs_dir)
+        self.classifier = QueryClassifier()
 
     def handle_option1_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
@@ -84,7 +86,7 @@ class ChatHandler:
                 'message': str(e)
             }
 
-    def handle_option2_query(self, analysis_id: str, query: str, top_k: int = 5) -> Dict[str, Any]:
+    def handle_option2_query(self, analysis_id: str, query: str, top_k: int = 3) -> Dict[str, Any]:
         try:
             analysis = self.supabase.get_analysis_by_id(analysis_id)
             if not analysis:
@@ -105,20 +107,57 @@ class ChatHandler:
                     'message': 'Vector collection not found for this analysis'
                 }
 
-            print("Performing similarity search...")
+            query_classification = self.classifier.classify_query(query)
+
+            if query_classification['is_greeting']:
+                response = self._handle_greeting_query(query)
+                self.supabase.insert_chat_message(
+                    analysis_id=analysis_id,
+                    user_query=query,
+                    llm_response=response,
+                    retrieved_chunks=None
+                )
+                return {
+                    'status': 'success',
+                    'response': response,
+                    'mode': 'option2',
+                    'retrieved_chunks': None
+                }
+
+            if query_classification['is_help_request']:
+                response = self._handle_help_query()
+                self.supabase.insert_chat_message(
+                    analysis_id=analysis_id,
+                    user_query=query,
+                    llm_response=response,
+                    retrieved_chunks=None
+                )
+                return {
+                    'status': 'success',
+                    'response': response,
+                    'mode': 'option2',
+                    'retrieved_chunks': None
+                }
+
+            expanded_query = self._expand_query(query, query_classification)
+            print(f"Performing similarity search with query: '{expanded_query}'")
             search_results = self.vector_store.similarity_search(
                 collection_name=f"pcap_{analysis_id}",
-                query_text=query,
+                query_text=expanded_query,
                 n_results=top_k
             )
 
             if search_results['count'] == 0:
-                return {
-                    'status': 'error',
-                    'message': 'No relevant chunks found for your query. Try rephrasing or asking about general statistics.'
-                }
+                print("No relevant chunks found, falling back to summary-based response")
+                return self._handle_fallback_to_summary(analysis_id, query)
 
-            context = self._format_rag_context(search_results['chunks'])
+            filtered_chunks = self._filter_chunks_by_relevance(search_results['chunks'], threshold=0.7)
+
+            if len(filtered_chunks) == 0:
+                print("All chunks filtered out due to low relevance, using fallback")
+                return self._handle_fallback_to_summary(analysis_id, query)
+
+            context = self._format_rag_context(filtered_chunks)
 
             chat_history = self.supabase.get_chat_history(analysis_id)
             formatted_history = [
@@ -145,7 +184,7 @@ class ChatHandler:
                     'metadata': chunk['metadata'],
                     'distance': chunk['distance']
                 }
-                for chunk in search_results['chunks']
+                for chunk in filtered_chunks
             ]
 
             self.supabase.insert_chat_message(
@@ -352,3 +391,142 @@ class ChatHandler:
 
     def get_chat_history(self, analysis_id: str) -> List[Dict[str, Any]]:
         return self.supabase.get_chat_history(analysis_id)
+
+    def _handle_greeting_query(self, query: str) -> str:
+        greetings_map = {
+            'hi': 'Hello! I\'m ready to help you analyze this PCAP file. What would you like to know?',
+            'hello': 'Hello! I\'m here to assist with your network traffic analysis. How can I help?',
+            'hey': 'Hey! Ready to dive into the network analysis. What\'s your question?',
+            'good morning': 'Good morning! Let\'s explore the network traffic together. What would you like to investigate?',
+            'good afternoon': 'Good afternoon! I\'m here to help with your PCAP analysis. What can I answer for you?',
+            'good evening': 'Good evening! Ready to analyze the network traffic. What would you like to know?'
+        }
+
+        query_lower = query.lower().strip()
+        for greeting, response in greetings_map.items():
+            if greeting in query_lower:
+                return response
+
+        return 'Hello! I\'m your network security analyst assistant. Ask me anything about the PCAP file analysis.'
+
+    def _handle_help_query(self) -> str:
+        return """I can help you analyze network traffic from this PCAP file. Here's what you can ask me about:
+
+**Network Activity:**
+- Which IPs communicated and what data was transferred?
+- What protocols were used (TCP, UDP, HTTP, DNS, TLS)?
+- What files were downloaded or uploaded?
+- What domains or websites were accessed?
+
+**Security Analysis:**
+- Are there any malicious IPs or domains (based on VirusTotal)?
+- What threats or suspicious activities were detected?
+- Which file hashes were flagged as malicious?
+- What security recommendations do you have?
+
+**Specific Investigations:**
+- What did IP address X.X.X.X do?
+- What happened at a specific time?
+- Which connections involved a specific domain?
+- What's the timeline of events?
+
+Just ask your question naturally, and I'll search through the network traffic and threat intelligence data to provide you with specific answers."""
+
+    def _expand_query(self, query: str, classification: Dict[str, Any]) -> str:
+        query_lower = query.lower()
+
+        expansions = []
+
+        if 'file_analysis' in classification['topics']:
+            expansions.append('file transfer download upload HTTP')
+
+        if 'domain_analysis' in classification['topics']:
+            expansions.append('DNS domain hostname')
+
+        if 'ip_analysis' in classification['topics']:
+            expansions.append('IP address connection')
+
+        if classification['is_threat_focused']:
+            expansions.append('malicious threat VirusTotal security')
+
+        if 'hash' in query_lower:
+            expansions.append('SHA256 MD5 file hash checksum')
+
+        if expansions:
+            expanded = f"{query} {' '.join(expansions)}"
+            print(f"Query expanded with context: {expansions}")
+            return expanded
+
+        return query
+
+    def _filter_chunks_by_relevance(self, chunks: List[Dict[str, Any]], threshold: float = 0.7) -> List[Dict[str, Any]]:
+        if not chunks:
+            return []
+
+        filtered = []
+        for chunk in chunks:
+            distance = chunk.get('distance', 1.0)
+            similarity = 1 - distance
+
+            if similarity >= threshold:
+                filtered.append(chunk)
+            else:
+                print(f"Filtered out chunk with similarity {similarity:.3f} (below threshold {threshold})")
+
+        print(f"Filtered {len(chunks)} chunks -> {len(filtered)} relevant chunks")
+        return filtered
+
+    def _handle_fallback_to_summary(self, analysis_id: str, query: str) -> Dict[str, Any]:
+        try:
+            summary_file = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
+            if not summary_file.exists():
+                return {
+                    'status': 'error',
+                    'message': 'I couldn\'t find relevant information to answer your specific question. The query might be too specific or use terms not present in the traffic data. Try asking about general statistics, threats, or rephrasing your question.'
+                }
+
+            with open(summary_file, 'r') as f:
+                summary_data = json.load(f)
+
+            context = self._format_summary_context(summary_data)
+
+            chat_history = self.supabase.get_chat_history(analysis_id)
+            formatted_history = [
+                {'user': msg['user_query'], 'assistant': msg['llm_response']}
+                for msg in chat_history[-3:]
+            ]
+
+            prompt = self.ollama.format_prompt_for_network_analysis(
+                query=query,
+                context=context,
+                chat_history=formatted_history,
+                analysis_mode='option2_fallback'
+            )
+
+            system_prompt = self.ollama.get_option2_system_prompt()
+            response = self.ollama.generate_llm_response(
+                prompt=prompt,
+                stream=False,
+                system_prompt=system_prompt
+            )
+
+            self.supabase.insert_chat_message(
+                analysis_id=analysis_id,
+                user_query=query,
+                llm_response=response,
+                retrieved_chunks=None
+            )
+
+            return {
+                'status': 'success',
+                'response': response,
+                'mode': 'option2',
+                'retrieved_chunks': None
+            }
+
+        except Exception as e:
+            print(f"Error in fallback handler: {str(e)}")
+            return {
+                'status': 'error',
+                'message': 'I couldn\'t find specific information to answer your question. Try asking about overall threats, statistics, or rephrasing your query.'
+            }

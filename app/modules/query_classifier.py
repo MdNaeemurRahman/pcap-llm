@@ -11,6 +11,8 @@ class QueryClassifier:
         self.domain_keywords = ['domain', 'dns', 'hostname', 'website', 'url']
         self.protocol_keywords = ['protocol', 'tcp', 'udp', 'http', 'https', 'icmp', 'dns query']
         self.packet_keywords = ['packet', 'packets', 'traffic', 'flow', 'communication', 'connection']
+        self.file_keywords = ['file', 'download', 'upload', 'transfer', 'hash', 'sha256', 'md5']
+        self.specific_query_patterns = ['which', 'what', 'who', 'when', 'where', 'how many']
 
     def classify_query(self, query: str) -> Dict[str, Any]:
         query_lower = query.lower().strip()
@@ -23,6 +25,8 @@ class QueryClassifier:
             'is_help_request': False,
             'is_summary_request': False,
             'is_threat_focused': False,
+            'is_specific_query': self._is_specific_query(query_lower),
+            'is_simple_factual': self._is_simple_factual(query_lower),
             'topics': []
         }
 
@@ -54,7 +58,15 @@ class QueryClassifier:
         return classification
 
     def _is_greeting(self, query: str) -> bool:
-        return any(greeting in query for greeting in self.greeting_keywords)
+        query_words = query.split()
+        for greeting in self.greeting_keywords:
+            if greeting in self.greeting_keywords[:3]:
+                if query == greeting or query.startswith(f"{greeting} ") or query.startswith(f"{greeting}!"):
+                    return True
+            else:
+                if greeting in query:
+                    return True
+        return False
 
     def _is_help_request(self, query: str) -> bool:
         return any(keyword in query for keyword in self.help_keywords)
@@ -80,7 +92,25 @@ class QueryClassifier:
         if any(keyword in query for keyword in self.packet_keywords):
             topics.append('packet_analysis')
 
+        if any(keyword in query for keyword in self.file_keywords):
+            topics.append('file_analysis')
+
         return topics
+
+    def _is_specific_query(self, query: str) -> bool:
+        return any(pattern in query for pattern in self.specific_query_patterns)
+
+    def _is_simple_factual(self, query: str) -> bool:
+        query_words = query.split()
+        if len(query_words) <= 6 and self._is_specific_query(query):
+            return True
+
+        simple_patterns = [
+            'which ip', 'which domain', 'which file', 'which host',
+            'what ip', 'what domain', 'what file', 'what host',
+            'what is the hash', 'what hash', 'show me'
+        ]
+        return any(pattern in query for pattern in simple_patterns)
 
     def get_context_priority(self, classification: Dict[str, Any]) -> Dict[str, int]:
         priority = {
