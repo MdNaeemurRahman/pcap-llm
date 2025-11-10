@@ -1,11 +1,29 @@
 from supabase import create_client, Client
 from typing import Dict, List, Any, Optional
 from datetime import datetime
+import sys
 
 
 class SupabaseManager:
     def __init__(self, url: str, key: str):
-        self.client: Client = create_client(url, key)
+        try:
+            self.client: Client = create_client(url, key)
+            self.client.table('pcap_analyses').select('id').limit(1).execute()
+        except Exception as e:
+            error_msg = str(e)
+            print("\n" + "="*60)
+            print("ERROR: Failed to initialize Supabase client!")
+            print("="*60)
+            print(f"\nError details: {error_msg}")
+            print(f"\nProvided URL: {url}")
+            print("\nPossible causes:")
+            print("  1. Invalid Supabase URL format")
+            print("  2. Invalid API key")
+            print("  3. Network connectivity issues")
+            print("  4. Project does not exist or is not accessible")
+            print("\nPlease verify your Supabase credentials in the .env file.")
+            print("="*60 + "\n")
+            sys.exit(1)
 
     def insert_analysis_record(
         self,
