@@ -194,7 +194,7 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
 
                 # Clear chat history for mode switch
                 try:
-                    supabase_manager.client.table('chat_messages').delete().eq('analysis_id', analysis_id).execute()
+                    supabase_manager.client.table('chat_sessions').delete().eq('analysis_id', analysis_id).execute()
                 except Exception as e:
                     print(f"Error clearing chat history: {e}")
 
@@ -291,6 +291,129 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                                 "mode": current_mode,
                                 "status": "ready"
                             })
+
+                # For any mode -> option3: just update the mode (option3 doesn't need pre-processing)
+                elif request.mode == 'option3':
+                    print(f"Switching from {current_mode} to Option 3")
+
+                    # Find and store the PCAP file path
+                    pcap_files = list(settings.uploads_dir.glob("*.pcap")) + \
+                                 list(settings.uploads_dir.glob("*.pcapng")) + \
+                                 list(settings.uploads_dir.glob("*.cap"))
+
+                    file_path = None
+                    for pcap_file in pcap_files:
+                        from .modules.pcap_parser import PCAPParser
+                        parser = PCAPParser(str(pcap_file))
+                        if parser.compute_file_hash() == file_hash:
+                            file_path = str(pcap_file)
+                            break
+
+                    if file_path:
+                        supabase_manager.store_pcap_file_path(analysis_id, file_path)
+                        supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option3')
+
+                        return JSONResponse({
+                            "message": "Switched to Option 3 mode (Agentic TShark)",
+                            "analysis_id": analysis_id,
+                            "mode": request.mode,
+                            "status": "ready"
+                        })
+                    else:
+                        return JSONResponse({
+                            "message": "Cannot switch modes: PCAP file not found",
+                            "analysis_id": analysis_id,
+                            "mode": current_mode,
+                            "status": "ready"
+                        })
+
+                # For option3 -> option1: check if summary exists, generate if needed
+                elif current_mode == 'option3' and request.mode == 'option1':
+                    print("Switching from Option 3 to Option 1")
+
+                    summary_file = settings.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
+
+                    if summary_file.exists():
+                        print("Summary file exists, switching to Option 1 mode")
+                        supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option1')
+
+                        return JSONResponse({
+                            "message": "Switched to Option 1 mode (using existing summary)",
+                            "analysis_id": analysis_id,
+                            "mode": request.mode,
+                            "status": "ready"
+                        })
+                    else:
+                        print("Summary file does not exist, generating it now")
+
+                        pcap_files = list(settings.uploads_dir.glob("*.pcap")) + \
+                                     list(settings.uploads_dir.glob("*.pcapng")) + \
+                                     list(settings.uploads_dir.glob("*.cap"))
+
+                        file_path = None
+                        filename = None
+                        for pcap_file in pcap_files:
+                            from .modules.pcap_parser import PCAPParser
+                            parser = PCAPParser(str(pcap_file))
+                            if parser.compute_file_hash() == file_hash:
+                                file_path = str(pcap_file)
+                                filename = pcap_file.name
+                                break
+
+                        if file_path:
+                            supabase_manager.update_analysis_status(analysis_id, 'parsing', current_mode='option1')
+
+                            background_tasks.add_task(
+                                pipeline.process_option1,
+                                file_path, filename, analysis_id
+                            )
+
+                            return JSONResponse({
+                                "message": "Switching to Option 1 mode - generating summary (reusing cached threat intelligence)",
+                                "analysis_id": analysis_id,
+                                "mode": request.mode,
+                                "status": "processing"
+                            })
+                        else:
+                            return JSONResponse({
+                                "message": "Cannot switch modes: PCAP file not found",
+                                "analysis_id": analysis_id,
+                                "mode": current_mode,
+                                "status": "ready"
+                            })
+
+                # For option3 -> option2: need to create vector embeddings
+                elif current_mode == 'option3' and request.mode == 'option2':
+                    print("Switching from Option 3 to Option 2: Creating vector embeddings...")
+                    print("Note: VirusTotal results are cached and will be reused")
+                    supabase_manager.update_analysis_status(analysis_id, 'embedding', current_mode='option2')
+
+                    pcap_files = list(settings.uploads_dir.glob("*.pcap")) + \
+                                 list(settings.uploads_dir.glob("*.pcapng")) + \
+                                 list(settings.uploads_dir.glob("*.cap"))
+
+                    file_path = None
+                    filename = None
+                    for pcap_file in pcap_files:
+                        from .modules.pcap_parser import PCAPParser
+                        parser = PCAPParser(str(pcap_file))
+                        if parser.compute_file_hash() == file_hash:
+                            file_path = str(pcap_file)
+                            filename = pcap_file.name
+                            break
+
+                    if file_path:
+                        background_tasks.add_task(
+                            pipeline.process_option2,
+                            file_path, filename, analysis_id
+                        )
+
+                        return JSONResponse({
+                            "message": "Switching to Option 2 mode - creating vector embeddings (reusing cached threat intelligence)",
+                            "analysis_id": analysis_id,
+                            "mode": request.mode,
+                            "status": "processing"
+                        })
 
             elif existing_analysis['status'] in ['parsing', 'enriching', 'embedding', 'uploaded']:
                 return JSONResponse({
