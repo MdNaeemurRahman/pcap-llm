@@ -4,6 +4,8 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 from .ollama_client import OllamaClient
 from .tshark_executor import TSharkExecutor
+from .conversation_memory import ConversationMemory
+from .reasoning_engine import ReasoningEngine
 
 
 def sanitize_paths(text: str) -> str:
@@ -37,6 +39,8 @@ class TSharkAgent:
         self.executor = TSharkExecutor()
         self.max_iterations = 5
         self.command_history = []
+        self.memory = ConversationMemory(max_history=10)
+        self.reasoning_engine = ReasoningEngine(ollama_client, self.memory)
 
     def _is_greeting(self, query: str) -> bool:
         """Check if the query is a simple greeting."""
@@ -44,88 +48,9 @@ class TSharkAgent:
         query_lower = query.lower().strip()
         return any(greeting == query_lower or query_lower.startswith(greeting) for greeting in greetings) and len(query.split()) <= 3
 
-    def _can_answer_from_summary(self, query: str, pcap_summary: Dict[str, Any]) -> Optional[str]:
-        """Check if query can be answered directly from summary data without TShark execution."""
-        query_lower = query.lower()
-
-        if any(phrase in query_lower for phrase in ['which ip', 'what ip', 'malicious ip', 'suspicious ip', 'bad ip']):
-            vt_results = pcap_summary.get('virustotal_results', {})
-            flagged_entities = vt_results.get('flagged_entities', [])
-            malicious_ips = [e for e in flagged_entities if e.get('entity_type') == 'ip' and e.get('malicious_count', 0) > 0]
-
-            if malicious_ips:
-                response_parts = [f"Based on VirusTotal threat intelligence, I found {len(malicious_ips)} malicious IP address(es) in this capture:\n"]
-                for entity in malicious_ips[:10]:
-                    ip = entity.get('entity_value', 'Unknown')
-                    mal_count = entity.get('malicious_count', 0)
-                    total_engines = mal_count + entity.get('harmless_count', 0)
-                    response_parts.append(f"- **{ip}**: Flagged by {mal_count}/{total_engines} security vendors")
-                    if entity.get('threat_label'):
-                        response_parts.append(f"  - Threat Type: {entity['threat_label']}")
-
-                return "\n".join(response_parts)
-            else:
-                return "Based on VirusTotal analysis, no malicious IP addresses were detected in this capture."
-
-        if any(phrase in query_lower for phrase in ['malicious domain', 'suspicious domain', 'bad domain', 'which domain']):
-            vt_results = pcap_summary.get('virustotal_results', {})
-            flagged_entities = vt_results.get('flagged_entities', [])
-            malicious_domains = [e for e in flagged_entities if e.get('entity_type') == 'domain' and e.get('malicious_count', 0) > 0]
-
-            if malicious_domains:
-                response_parts = [f"Based on VirusTotal threat intelligence, I found {len(malicious_domains)} malicious domain(s) in this capture:\n"]
-                for entity in malicious_domains[:10]:
-                    domain = entity.get('entity_value', 'Unknown')
-                    mal_count = entity.get('malicious_count', 0)
-                    response_parts.append(f"- **{domain}**: Flagged by {mal_count} security vendors")
-
-                return "\n".join(response_parts)
-            else:
-                return "Based on VirusTotal analysis, no malicious domains were detected in this capture."
-
-        if any(phrase in query_lower for phrase in ['how many packet', 'total packet', 'packet count']):
-            stats = pcap_summary.get('statistics', {})
-            total = stats.get('total_packets', 'Unknown')
-            return f"This PCAP file contains **{total:,}** packets." if isinstance(total, int) else f"This PCAP file contains {total} packets."
-
-        if any(phrase in query_lower for phrase in ['what protocol', 'which protocol', 'top protocol']):
-            stats = pcap_summary.get('statistics', {})
-            protocols = stats.get('top_protocols', {})
-            if protocols:
-                response_parts = ["The most common protocols in this capture are:\n"]
-                for proto, count in list(protocols.items())[:5]:
-                    response_parts.append(f"- **{proto}**: {count:,} packets")
-                return "\n".join(response_parts)
-
-        if any(phrase in query_lower for phrase in ['overall threat', 'threat summary', 'security summary', 'any threat']):
-            vt_results = pcap_summary.get('virustotal_results', {})
-            if vt_results:
-                summary = vt_results.get('summary', {})
-                mal_count = summary.get('malicious_entities', 0)
-                sus_count = summary.get('suspicious_entities', 0)
-
-                if mal_count > 0 or sus_count > 0:
-                    response = f"**Threat Intelligence Summary:**\n\n"
-                    response += f"- **{mal_count}** malicious entities detected\n"
-                    response += f"- **{sus_count}** suspicious entities detected\n\n"
-
-                    flagged = vt_results.get('flagged_entities', [])
-                    mal_ips = len([e for e in flagged if e.get('entity_type') == 'ip' and e.get('malicious_count', 0) > 0])
-                    mal_domains = len([e for e in flagged if e.get('entity_type') == 'domain' and e.get('malicious_count', 0) > 0])
-                    mal_files = len([e for e in flagged if e.get('entity_type') == 'file' and e.get('malicious_count', 0) > 0])
-
-                    if mal_ips > 0:
-                        response += f"- {mal_ips} malicious IP address(es)\n"
-                    if mal_domains > 0:
-                        response += f"- {mal_domains} malicious domain(s)\n"
-                    if mal_files > 0:
-                        response += f"- {mal_files} malicious file hash(es)\n"
-
-                    return response
-                else:
-                    return "Based on VirusTotal analysis, no significant threats were detected in this capture."
-
-        return None
+    def _can_answer_from_summary(self, query: str, pcap_summary: Dict[str, Any], intent: Dict[str, Any]) -> Optional[str]:
+        """Use reasoning engine to check if query can be answered from summary data."""
+        return self.reasoning_engine.check_summary_for_answer(query, pcap_summary, intent)
 
     def get_tshark_reference_prompt(self) -> str:
         return """You are an expert network security analyst with deep knowledge of TShark and Wireshark display filters.
@@ -176,6 +101,15 @@ HTTP:
 - http.request.uri contains "/api" (URI path)
 - http.response.code == 200 (HTTP status code)
 
+FTP (File Transfer Protocol):
+- ftp (all FTP traffic)
+- ftp.request.command == "USER" (FTP username)
+- ftp.request.command == "PASS" (FTP password)
+- ftp.request.command == "RETR" (file download)
+- ftp.request.command == "STOR" (file upload)
+- ftp.request.arg (extract FTP command argument)
+- ftp.response.code (FTP response codes)
+
 TCP:
 - tcp.flags.syn == 1 (SYN packets)
 - tcp.flags.reset == 1 (RST packets)
@@ -217,10 +151,22 @@ Combining Filters:
 6. Get DNS query names:
    -T fields -e dns.qry.name -Y "dns.flags.response == 0"
 
-7. Find retransmissions:
+7. Extract FTP passwords:
+   -T fields -e ftp.request.arg -Y "ftp.request.command == PASS"
+
+8. Extract FTP usernames:
+   -T fields -e ftp.request.arg -Y "ftp.request.command == USER"
+
+9. Find FTP file downloads:
+   -T fields -e ftp.request.arg -Y "ftp.request.command == RETR"
+
+10. See all FTP communication:
+   -Y "ftp"
+
+11. Find retransmissions:
    -Y "tcp.analysis.retransmission"
 
-8. Protocol hierarchy statistics:
+12. Protocol hierarchy statistics:
    -q -z io,phs
 
 **YOUR TASK:**
@@ -363,7 +309,19 @@ Remember: Only use -Y for display filters, return JSON format response."""
         pcap_summary: Dict[str, Any],
         pcap_file_path: str
     ) -> Dict[str, Any]:
+        """
+        NEW AGENTIC WORKFLOW with multi-step reasoning and conversational memory.
+
+        Steps:
+        1. Analyze query intent using reasoning engine
+        2. Check if answer exists in summary data or conversation memory
+        3. If not, plan and execute dynamic TShark analysis
+        4. Interpret results and extract discovered entities
+        5. Store in conversation memory for future reference
+        """
         self.command_history = []
+
+        print(f"[Option 3] Processing query with agentic reasoning: {user_query}")
 
         # Handle simple greetings
         if self._is_greeting(user_query):
@@ -383,58 +341,109 @@ Remember: Only use -Y for display filters, return JSON format response."""
 
             greeting += "\nWhat would you like to know about the captured packets?"
 
+            self.memory.add_exchange(
+                user_query=user_query,
+                llm_response=greeting,
+                reasoning="Greeting interaction"
+            )
+
             return {
                 'success': True,
                 'is_greeting': True,
                 'response': greeting
             }
 
-        # Try to answer from summary data first
-        summary_response = self._can_answer_from_summary(user_query, pcap_summary)
-        if summary_response:
-            return {
-                'success': True,
-                'response': summary_response,
-                'mode': 'option3',
-                'answered_from_summary': True
-            }
+        # STEP 1: Analyze query intent with reasoning engine
+        print("[Option 3] Step 1: Analyzing query intent...")
+        intent = self.reasoning_engine.analyze_query_intent(user_query, pcap_summary)
+        print(f"[Option 3] Intent analysis: {json.dumps(intent, indent=2)}")
 
-        command_plan_result = self.analyze_query_and_generate_commands(
-            user_query, pcap_summary, pcap_file_path
+        # STEP 2: Try to answer from summary data using reasoning
+        if intent.get('can_answer_from_summary', False):
+            print("[Option 3] Step 2: Checking if summary data contains answer...")
+            summary_response = self._can_answer_from_summary(user_query, pcap_summary, intent)
+
+            if summary_response:
+                print("[Option 3] Answer found in summary data")
+                self.memory.add_exchange(
+                    user_query=user_query,
+                    llm_response=summary_response,
+                    reasoning=intent.get('reasoning', 'Answered from summary')
+                )
+
+                return {
+                    'success': True,
+                    'response': summary_response,
+                    'mode': 'option3',
+                    'answered_from_summary': True
+                }
+
+        # STEP 3: Check if user is asking for command suggestion
+        if intent.get('query_type') == 'command_request':
+            print("[Option 3] User requesting command suggestion")
+            command_plan_result = self.analyze_query_and_generate_commands(
+                user_query, pcap_summary, pcap_file_path
+            )
+
+            if command_plan_result.get('success', False):
+                command_plan = command_plan_result.get('command_plan', {})
+                if command_plan.get('command_suggestion_only'):
+                    suggested_cmd = sanitize_paths(command_plan.get('suggested_command', ''))
+                    response_text = f"To see this yourself, run:\n\n```bash\n{suggested_cmd}\n```\n\n{command_plan.get('explanation', '')}"
+
+                    self.memory.add_exchange(
+                        user_query=user_query,
+                        llm_response=response_text,
+                        reasoning="Command suggestion provided"
+                    )
+
+                    return {
+                        'success': True,
+                        'suggestion_only': True,
+                        'suggested_command': suggested_cmd,
+                        'explanation': command_plan.get('explanation')
+                    }
+
+        # STEP 4: Plan dynamic analysis using reasoning engine
+        print("[Option 3] Step 3: Planning dynamic TShark analysis...")
+        analysis_plan_result = self.reasoning_engine.plan_dynamic_analysis(
+            user_query, pcap_summary, intent
         )
 
-        # Safely check for success key with defensive handling
-        if not command_plan_result.get('success', False):
-            return command_plan_result
-
-        command_plan = command_plan_result.get('command_plan')
-
-        # Validate command_plan exists
-        if not command_plan:
+        if not analysis_plan_result.get('success', False):
+            error_msg = analysis_plan_result.get('error', 'Failed to plan analysis')
+            self.memory.add_exchange(
+                user_query=user_query,
+                llm_response=error_msg,
+                reasoning="Analysis planning failed"
+            )
             return {
                 'success': False,
-                'error': 'No command plan generated from query analysis'
+                'error': error_msg
             }
 
-        if command_plan.get('command_suggestion_only'):
-            suggested_cmd = sanitize_paths(command_plan.get('suggested_command', ''))
-            return {
-                'success': True,
-                'suggestion_only': True,
-                'suggested_command': suggested_cmd,
-                'explanation': command_plan.get('explanation')
-            }
+        analysis_plan = analysis_plan_result['plan']
+        commands = analysis_plan.get('commands', [])
 
-        commands = command_plan.get('commands', [])
         if not commands:
+            error_msg = "I couldn't determine how to analyze the traffic for your question. Could you rephrase it or ask about something more specific?"
+            self.memory.add_exchange(
+                user_query=user_query,
+                llm_response=error_msg,
+                reasoning="No commands generated"
+            )
             return {
                 'success': False,
-                'error': 'No commands generated from query'
+                'error': error_msg
             }
 
+        print(f"[Option 3] Planned {len(commands)} analysis commands")
+
+        # STEP 5: Execute TShark commands
+        print("[Option 3] Step 4: Executing TShark commands...")
         all_results = []
         for i, cmd_spec in enumerate(commands[:self.max_iterations]):
-            print(f"Executing command {i+1}/{len(commands)}: {cmd_spec.get('purpose', 'N/A')}")
+            print(f"[Option 3] Executing command {i+1}/{len(commands)}: {cmd_spec.get('purpose', 'N/A')}")
 
             result = self.executor.execute_custom_command(
                 pcap_file_path,
@@ -451,18 +460,39 @@ Remember: Only use -Y for display filters, return JSON format response."""
                 'command': result.get('command', ''),
                 'purpose': cmd_spec.get('purpose', ''),
                 'output': result.get('output', result.get('error', '')),
-                'success': result['success']
+                'success': result['success'],
+                'extracts': cmd_spec.get('extracts', '')
             })
 
             if not result['success']:
+                print(f"[Option 3] Command {i+1} failed, stopping execution")
                 break
 
-        interpretation = self._interpret_results(
-            user_query, all_results, command_plan.get('interpretation_guidance', '')
+        # STEP 6: Interpret results using reasoning engine
+        print("[Option 3] Step 5: Interpreting analysis results...")
+        interpretation = self.reasoning_engine.interpret_analysis_results(
+            user_query, all_results, intent
         )
 
         # Sanitize interpretation to remove any leaked paths
         interpretation = sanitize_paths(interpretation)
+
+        # STEP 7: Extract discovered entities and store in memory
+        print("[Option 3] Step 6: Extracting discovered entities...")
+        discovered_entities = self.reasoning_engine.extract_discovered_entities(all_results)
+
+        self.memory.add_exchange(
+            user_query=user_query,
+            llm_response=interpretation,
+            reasoning=analysis_plan.get('reasoning', ''),
+            commands_executed=[{
+                'command': sanitize_paths(r['command']),
+                'purpose': r['purpose']
+            } for r in all_results],
+            discovered_info=discovered_entities
+        )
+
+        print(f"[Option 3] Workflow complete. Discovered entities: {list(discovered_entities.keys())}")
 
         # Sanitize commands in results for potential display
         sanitized_results = []
@@ -476,7 +506,7 @@ Remember: Only use -Y for display filters, return JSON format response."""
             'success': True,
             'results': sanitized_results,
             'interpretation': interpretation,
-            'llm_reasoning': command_plan.get('reasoning', ''),
+            'llm_reasoning': analysis_plan.get('reasoning', ''),
             'commands_executed': len(all_results)
         }
 

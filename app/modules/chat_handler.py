@@ -6,6 +6,7 @@ from .vector_store import VectorStoreManager
 from .supabase_client import SupabaseManager
 from .query_classifier import QueryClassifier
 from .tshark_agent import TSharkAgent
+
 class ChatHandler:
     def __init__(
         self,
@@ -20,6 +21,7 @@ class ChatHandler:
         self.json_outputs_dir = Path(json_outputs_dir)
         self.classifier = QueryClassifier()
         self.tshark_agent = TSharkAgent(ollama_client)
+        self.option3_agents = {}
 
     def handle_option1_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
@@ -213,6 +215,24 @@ class ChatHandler:
                 'message': str(e)
             }
 
+    def _get_or_create_option3_agent(self, analysis_id: str) -> TSharkAgent:
+        """Get or create a TSharkAgent with persistent memory for this analysis session."""
+        if analysis_id not in self.option3_agents:
+            print(f"[Option 3] Creating new agent with conversation memory for analysis {analysis_id}")
+            self.option3_agents[analysis_id] = TSharkAgent(self.ollama)
+        return self.option3_agents[analysis_id]
+
+    def clear_option3_memory(self, analysis_id: str):
+        """Clear conversation memory for a specific analysis session."""
+        if analysis_id in self.option3_agents:
+            print(f"[Option 3] Clearing conversation memory for analysis {analysis_id}")
+            del self.option3_agents[analysis_id]
+
+    def clear_all_option3_memories(self):
+        """Clear all Option 3 conversation memories (useful for memory management)."""
+        print(f"[Option 3] Clearing all conversation memories ({len(self.option3_agents)} sessions)")
+        self.option3_agents.clear()
+
     def handle_option3_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
             analysis = self.supabase.get_analysis_by_id(analysis_id)
@@ -251,16 +271,11 @@ class ChatHandler:
                     'message': f'PCAP file not found at stored path: {pcap_file_path}'
                 }
 
-            chat_history = self.supabase.get_chat_history(analysis_id)
-            formatted_history = [
-                {'user': msg['user_query'], 'assistant': msg['llm_response']}
-                for msg in chat_history[-3:]
-            ]
+            # Get or create agent with persistent memory for this session
+            agent = self._get_or_create_option3_agent(analysis_id)
 
-            enriched_query = self._enrich_query_with_context(query, formatted_history)
-
-            if not self.tshark_agent.executor.is_available():
-                error_msg = self.tshark_agent.executor.get_installation_instructions()
+            if not agent.executor.is_available():
+                error_msg = agent.executor.get_installation_instructions()
                 self.supabase.insert_chat_message(
                     analysis_id=analysis_id,
                     user_query=query,
@@ -273,9 +288,10 @@ class ChatHandler:
                     'mode': 'option3'
                 }
 
-            print(f"[Option 3] Executing agentic workflow for query: {enriched_query}")
-            result = self.tshark_agent.execute_agentic_workflow(
-                user_query=enriched_query,
+            print(f"[Option 3] Executing agentic workflow for query: {query}")
+            print(f"[Option 3] Conversation history size: {len(agent.memory.conversation_history)}")
+            result = agent.execute_agentic_workflow(
+                user_query=query,
                 pcap_summary=summary_data,
                 pcap_file_path=pcap_file_path
             )
