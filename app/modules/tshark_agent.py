@@ -130,15 +130,23 @@ class TSharkAgent:
     def get_tshark_reference_prompt(self) -> str:
         return """You are an expert network security analyst with deep knowledge of TShark and Wireshark display filters.
 
+**CRITICAL JSON RESPONSE REQUIREMENTS:**
+1. You MUST respond with COMPLETE, VALID JSON only
+2. ALWAYS finish your JSON response - do NOT let it get cut off
+3. Keep your response concise to avoid truncation
+4. If you need to truncate, ALWAYS close all JSON structures properly
+5. Test that your JSON is valid before responding
+
 **TSHARK COMMAND STRUCTURE:**
 tshark -r <pcap_file> [options]
 
 **IMPORTANT RULES:**
 1. Always use display filters with -Y flag (NOT -f or -R for read filters)
 2. You can only READ pcap files, never write or capture live
-3. Keep commands focused and specific
+3. Keep commands focused and specific (max 2-3 commands per response)
 4. Use appropriate output format: -T json, -T fields, or default text
 5. NEVER include the actual file path in command_args - the system provides it automatically
+6. Keep command_args arrays SHORT and FOCUSED
 
 **COMMON DISPLAY FILTER SYNTAX:**
 
@@ -217,35 +225,58 @@ Combining Filters:
 
 **YOUR TASK:**
 When given a user query about a PCAP file, analyze what they're asking and generate the appropriate TShark command(s).
-Return your response in JSON format with this structure:
+
+**CRITICAL: Your ENTIRE response must be VALID, COMPLETE JSON. Nothing else.**
+
+Return your response in this EXACT JSON structure:
 
 {
-  "reasoning": "Brief explanation of what you understand from the query",
+  "reasoning": "Brief 1-2 sentence explanation",
   "commands": [
     {
-      "command_args": ["list", "of", "tshark", "arguments", "WITHOUT", "-r", "flag"],
-      "purpose": "What this command will find",
-      "expected_output": "What kind of data this returns"
+      "command_args": ["-Y", "filter_here"],
+      "purpose": "Short description",
+      "expected_output": "Brief output description"
     }
   ],
   "needs_multiple_steps": false,
-  "interpretation_guidance": "How to interpret the results for the user"
+  "interpretation_guidance": "Brief guidance"
 }
 
 **CRITICAL COMMAND GENERATION RULES:**
 - Do NOT include '-r' or the file path in command_args - the system adds it automatically
-- command_args should start with filters like: ["-Y", "ip.addr == 192.168.1.1"]
+- command_args should be SHORT: ["-Y", "ip.addr == 192.168.1.1"]
 - For statistics: ["-q", "-z", "io,stat,0"]
 - For field extraction: ["-T", "fields", "-e", "field_name", "-Y", "filter"]
+- Keep reasoning and guidance BRIEF (under 100 chars each)
+- Generate MAX 2 commands to avoid truncation
 
-If the query is asking "what command should I run", provide the command but set a flag:
+**FOR COMMAND SUGGESTION QUERIES:**
+If the query asks "what command should I run", use this structure:
 {
   "command_suggestion_only": true,
   "suggested_command": "tshark -r file.pcap -Y 'filter'",
-  "explanation": "This command will..."
+  "explanation": "Brief explanation of what this does"
 }
 
-Be precise, security-focused, and helpful."""
+**EXAMPLE VALID RESPONSES:**
+
+Example 1 (Execution):
+{
+  "reasoning": "User wants traffic to/from specific IP",
+  "commands": [{"command_args": ["-Y", "ip.addr == 192.168.1.1"], "purpose": "Find all packets with this IP", "expected_output": "Packet list"}],
+  "needs_multiple_steps": false,
+  "interpretation_guidance": "Show packet count and communication patterns"
+}
+
+Example 2 (Suggestion):
+{
+  "command_suggestion_only": true,
+  "suggested_command": "tshark -r file.pcap -Y 'ip.addr == 192.168.1.1'",
+  "explanation": "This displays all packets involving the specified IP address"
+}
+
+Be precise, security-focused, and ALWAYS complete your JSON response."""
 
     def analyze_query_and_generate_commands(
         self,
@@ -285,7 +316,7 @@ Remember: Only use -Y for display filters, return JSON format response."""
             response = self.ollama.generate_llm_response(
                 prompt=prompt,
                 stream=False,
-                system_prompt="You are a TShark expert. Always respond with valid JSON."
+                system_prompt="You are a TShark expert. Always respond with valid, complete JSON."
             )
 
             command_plan = self._parse_llm_response(response)
@@ -294,14 +325,21 @@ Remember: Only use -Y for display filters, return JSON format response."""
                 print(f"[TShark Agent] Failed to parse LLM response. Raw response: {response[:500]}")
                 return {
                     'success': False,
-                    'error': 'Failed to parse LLM response into command plan'
+                    'error': 'Failed to parse LLM response into command plan. The AI response was malformed - please try rephrasing your question or asking something simpler.'
                 }
 
-            # Validate command_plan structure
             if not isinstance(command_plan, dict):
                 return {
                     'success': False,
-                    'error': f'Command plan is not a dictionary: {type(command_plan)}'
+                    'error': f'Invalid response format received. Please try rephrasing your question.'
+                }
+
+            validation_error = self._validate_command_plan(command_plan)
+            if validation_error:
+                print(f"[TShark Agent] Command plan validation failed: {validation_error}")
+                return {
+                    'success': False,
+                    'error': f'Invalid command plan: {validation_error}. Please try a simpler query.'
                 }
 
             return {
@@ -316,7 +354,7 @@ Remember: Only use -Y for display filters, return JSON format response."""
             traceback.print_exc()
             return {
                 'success': False,
-                'error': f'Error generating commands: {str(e)}'
+                'error': f'Unable to generate analysis commands. Please try rephrasing your question or ask about something more specific.'
             }
 
     def execute_agentic_workflow(
@@ -542,25 +580,93 @@ Return JSON with:
 
     def _parse_llm_response(self, response: str) -> Optional[Dict[str, Any]]:
         try:
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                parsed = json.loads(json_match.group())
-            else:
-                parsed = json.loads(response)
+            cleaned_response = response.strip()
+            if cleaned_response.startswith('```json'):
+                cleaned_response = cleaned_response[7:]
+            if cleaned_response.startswith('```'):
+                cleaned_response = cleaned_response[3:]
+            if cleaned_response.endswith('```'):
+                cleaned_response = cleaned_response[:-3]
+            cleaned_response = cleaned_response.strip()
 
-            # Validate that parsed response is a dictionary
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', cleaned_response, re.DOTALL)
+
+            if json_match:
+                json_str = json_match.group()
+                json_str = self._fix_incomplete_json(json_str)
+                parsed = json.loads(json_str)
+            else:
+                parsed = json.loads(cleaned_response)
+
             if not isinstance(parsed, dict):
                 print(f"Parsed response is not a dictionary: {type(parsed)}")
                 return None
 
             return parsed
         except json.JSONDecodeError as e:
-            print(f"Failed to parse LLM response as JSON: {response[:200]}")
+            print(f"Failed to parse LLM response as JSON: {response[:600]}")
             print(f"JSON decode error: {str(e)}")
             return None
         except Exception as e:
             print(f"Unexpected error parsing LLM response: {str(e)}")
             return None
+
+    def _fix_incomplete_json(self, json_str: str) -> str:
+        quote_count = json_str.count('"') - json_str.count('\\"')
+
+        if quote_count % 2 == 1:
+            last_quote_pos = json_str.rfind('"')
+            if last_quote_pos > 0:
+                after_quote = json_str[last_quote_pos+1:].strip()
+                if after_quote and not after_quote.startswith(']') and not after_quote.startswith('}'):
+                    json_str = json_str[:last_quote_pos+1] + '"'
+
+        open_brackets = json_str.count('[') - json_str.count('\\[')
+        close_brackets = json_str.count(']') - json_str.count('\\]')
+
+        if open_brackets > close_brackets:
+            json_str += ']' * (open_brackets - close_brackets)
+
+        open_braces = json_str.count('{') - json_str.count('\\{')
+        close_braces = json_str.count('}') - json_str.count('\\}')
+
+        if open_braces > close_braces:
+            json_str += '}' * (open_braces - close_braces)
+
+        return json_str
+
+    def _validate_command_plan(self, command_plan: Dict[str, Any]) -> Optional[str]:
+        if command_plan.get('command_suggestion_only'):
+            if 'suggested_command' not in command_plan:
+                return "Missing 'suggested_command' field in suggestion response"
+            if not isinstance(command_plan['suggested_command'], str):
+                return "Invalid 'suggested_command' field type"
+            return None
+
+        if 'commands' not in command_plan:
+            return "Missing 'commands' field"
+
+        commands = command_plan['commands']
+        if not isinstance(commands, list):
+            return "'commands' must be a list"
+
+        if len(commands) == 0:
+            return "Empty commands list"
+
+        for i, cmd in enumerate(commands):
+            if not isinstance(cmd, dict):
+                return f"Command {i} is not a dictionary"
+
+            if 'command_args' not in cmd:
+                return f"Command {i} missing 'command_args' field"
+
+            if not isinstance(cmd['command_args'], list):
+                return f"Command {i} 'command_args' must be a list"
+
+            if len(cmd['command_args']) == 0:
+                return f"Command {i} has empty 'command_args'"
+
+        return None
 
     def _interpret_results(
         self,
