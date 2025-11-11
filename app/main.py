@@ -247,11 +247,15 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                         print("Summary file exists, switching to Option 1 mode")
                         supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option1')
 
+                        # Fetch updated analysis to ensure consistency
+                        updated_analysis = supabase_manager.get_analysis_by_id(analysis_id)
+
                         return JSONResponse({
                             "message": "Switched to Option 1 mode (using existing summary)",
                             "analysis_id": analysis_id,
                             "mode": request.mode,
-                            "status": "ready"
+                            "status": "ready",
+                            "current_mode": updated_analysis.get('current_mode', 'option1') if updated_analysis else 'option1'
                         })
                     else:
                         print("Summary file does not exist, generating it now")
@@ -313,11 +317,15 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                         supabase_manager.store_pcap_file_path(analysis_id, file_path)
                         supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option3')
 
+                        # Fetch updated analysis to ensure consistency
+                        updated_analysis = supabase_manager.get_analysis_by_id(analysis_id)
+
                         return JSONResponse({
                             "message": "Switched to Option 3 mode (Agentic TShark)",
                             "analysis_id": analysis_id,
                             "mode": request.mode,
-                            "status": "ready"
+                            "status": "ready",
+                            "current_mode": updated_analysis.get('current_mode', 'option3') if updated_analysis else 'option3'
                         })
                     else:
                         return JSONResponse({
@@ -337,11 +345,15 @@ async def analyze_pcap(request: AnalyzeRequest, background_tasks: BackgroundTask
                         print("Summary file exists, switching to Option 1 mode")
                         supabase_manager.update_analysis_status(analysis_id, 'ready', current_mode='option1')
 
+                        # Fetch updated analysis to ensure consistency
+                        updated_analysis = supabase_manager.get_analysis_by_id(analysis_id)
+
                         return JSONResponse({
                             "message": "Switched to Option 1 mode (using existing summary)",
                             "analysis_id": analysis_id,
                             "mode": request.mode,
-                            "status": "ready"
+                            "status": "ready",
+                            "current_mode": updated_analysis.get('current_mode', 'option1') if updated_analysis else 'option1'
                         })
                     else:
                         print("Summary file does not exist, generating it now")

@@ -803,6 +803,9 @@
                         statsSection.classList.remove('hidden');
                         analyzeBtn.disabled = false;
                         chatMessages.innerHTML = '';
+
+                        // Fetch latest status to ensure display is synchronized
+                        await fetchAndUpdateStatus();
                     } else {
                         analysisStatus.innerHTML = `<div class="status-box info">${result.message} <span class="loader"></span></div>`;
                         reanalyzeMode = false;
@@ -818,6 +821,22 @@
                 analyzeBtn.disabled = false;
             }
         });
+
+        async function fetchAndUpdateStatus() {
+            try {
+                const response = await fetch(`/status/${currentAnalysisId}`);
+                const result = await response.json();
+
+                if (response.ok) {
+                    updateStats(result);
+                    console.log('Status updated:', result);
+                } else {
+                    console.error('Failed to fetch status:', result);
+                }
+            } catch (error) {
+                console.error('Error fetching status:', error);
+            }
+        }
 
         function startStatusPolling() {
             if (statusCheckInterval) clearInterval(statusCheckInterval);
