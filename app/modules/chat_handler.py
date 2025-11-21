@@ -22,6 +22,7 @@ class ChatHandler:
         self.classifier = QueryClassifier()
         self.tshark_agent = TSharkAgent(ollama_client)
         self.option3_agents = {}
+        self.option1_session_memory = {}
 
     def handle_option1_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
@@ -48,21 +49,27 @@ class ChatHandler:
             with open(summary_file, 'r') as f:
                 summary_data = json.load(f)
 
+            if analysis_id not in self.option1_session_memory:
+                self.option1_session_memory[analysis_id] = {
+                    'exchanges': [],
+                    'entities_mentioned': {'ips': [], 'domains': [], 'files': []},
+                    'vt_findings_shared': set()
+                }
+
+            session_memory = self.option1_session_memory[analysis_id]
+
             context = self._format_summary_context(summary_data)
 
-            chat_history = self.supabase.get_chat_history(analysis_id)
-            formatted_history = [
-                {'user': msg['user_query'], 'assistant': msg['llm_response']}
-                for msg in chat_history[-5:]
-            ]
+            enriched_query = self._enrich_query_with_session_memory(query, session_memory)
 
-            enriched_query = self._enrich_query_with_context(query, formatted_history)
+            memory_context = self._format_session_memory_context(session_memory)
 
             prompt = self.ollama.format_prompt_for_network_analysis(
                 query=enriched_query,
                 context=context,
-                chat_history=formatted_history,
-                analysis_mode='option1'
+                chat_history=None,
+                analysis_mode='option1',
+                session_memory_context=memory_context
             )
 
             system_prompt = self.ollama.get_system_prompt()
@@ -71,6 +78,8 @@ class ChatHandler:
                 stream=False,
                 system_prompt=system_prompt
             )
+
+            self._update_session_memory(session_memory, query, response, summary_data)
 
             self.supabase.insert_chat_message(
                 analysis_id=analysis_id,
@@ -428,114 +437,99 @@ class ChatHandler:
             }
 
     def _format_summary_context(self, summary_data: Dict[str, Any]) -> str:
+        """Format concise, security-focused summary for malware analysis."""
         context_parts = []
 
-        context_parts.append("=== PCAP FILE SUMMARY ===")
+        context_parts.append("=== PCAP SUMMARY ===")
         context_parts.append(f"File: {summary_data['file_info']['filename']}")
-        context_parts.append(f"File Hash (SHA256): {summary_data['file_info']['file_hash']}")
-        context_parts.append(f"Total Packets: {summary_data['statistics']['total_packets']}")
-        context_parts.append(f"Unique IPs: {summary_data['statistics']['unique_ips_count']}")
-        context_parts.append(f"Unique Domains: {summary_data['statistics']['unique_domains_count']}")
+        context_parts.append(f"Packets: {summary_data['statistics']['total_packets']} | IPs: {summary_data['statistics']['unique_ips_count']} | Domains: {summary_data['statistics']['unique_domains_count']}")
 
-        context_parts.append("\n=== TOP PROTOCOLS ===")
-        for proto, count in summary_data['statistics']['top_protocols'].items():
-            context_parts.append(f"{proto}: {count} packets")
+        top_protocols = summary_data['statistics']['top_protocols']
+        context_parts.append(f"Top Protocols: {', '.join([f'{k}({v})' for k, v in list(top_protocols.items())[:5]])}")
+
+        timeline = self._extract_malware_timeline(summary_data)
+        if timeline:
+            context_parts.append(f"\n=== MALWARE BEHAVIOR TIMELINE ===")
+            for event in timeline[:8]:
+                context_parts.append(f"[{event['time']}] {event['description']}")
 
         if 'virustotal_results' in summary_data:
             vt_summary = summary_data['virustotal_results']['summary']
-            context_parts.append("\n=== VIRUSTOTAL THREAT INTELLIGENCE ===")
-            context_parts.append(f"Total Entities Queried: {vt_summary['total_queried']}")
-            context_parts.append(f"Malicious Entities: {vt_summary['malicious_entities']}")
-            context_parts.append(f"Suspicious Entities: {vt_summary['suspicious_entities']}")
+            mal_count = vt_summary.get('malicious_entities', 0)
+            sus_count = vt_summary.get('suspicious_entities', 0)
 
-            file_threats = []
-            ip_threats = []
-            domain_threats = []
+            context_parts.append(f"\n=== THREAT INTELLIGENCE ===")
+            context_parts.append(f"VirusTotal: {mal_count} malicious, {sus_count} suspicious")
 
-            for entity in summary_data['virustotal_results']['flagged_entities']:
-                if entity['entity_type'] == 'file':
-                    file_threats.append(entity)
-                elif entity['entity_type'] == 'ip':
-                    ip_threats.append(entity)
-                elif entity['entity_type'] == 'domain':
-                    domain_threats.append(entity)
+            flagged = summary_data['virustotal_results']['flagged_entities']
 
+            file_threats = [e for e in flagged if e.get('entity_type') == 'file' and e.get('malicious_count', 0) > 0]
             if file_threats:
-                context_parts.append("\n=== FILE HASH ANALYSIS ===")
-                for entity in file_threats:
-                    threat_info = f"File Hash: {entity.get('entity_value', 'Unknown')[:16]}... "
-                    malicious_count = entity.get('malicious_count', 0)
-                    harmless_count = entity.get('harmless_count', 0)
-                    threat_info += f"(Malicious: {malicious_count}/{harmless_count + malicious_count} engines)"
-                    if entity.get('threat_label'):
-                        threat_info += f" - Threat: {entity['threat_label']}"
-                    context_parts.append(threat_info)
-
+                context_parts.append("\nMalicious Files:")
+                for entity in file_threats[:3]:
+                    mal = entity.get('malicious_count', 0)
+                    total = mal + entity.get('harmless_count', 0)
+                    label = entity.get('threat_label', 'Unknown')
+                    context_parts.append(f"  Hash: {entity.get('entity_value', 'N/A')[:16]}... [{mal}/{total} vendors] - {label}")
                     if entity.get('detection_engines'):
-                        context_parts.append("  Top Detections:")
-                        for detection in entity['detection_engines'][:5]:
-                            context_parts.append(f"    - {detection.get('engine', 'Unknown')}: {detection.get('result', 'Unknown')}")
+                        vendors = ', '.join([d.get('engine', '') for d in entity['detection_engines'][:3]])
+                        context_parts.append(f"  Detected by: {vendors}")
+
+            ip_threats = [e for e in flagged if e.get('entity_type') == 'ip' and e.get('malicious_count', 0) > 0]
+            domain_threats = [e for e in flagged if e.get('entity_type') == 'domain' and e.get('malicious_count', 0) > 0]
 
             if ip_threats or domain_threats:
-                context_parts.append("\n=== NETWORK THREATS ===")
-                for entity in (ip_threats + domain_threats)[:10]:
-                    entity_type = entity.get('entity_type', 'unknown').upper()
-                    entity_value = entity.get('entity_value', 'Unknown')
-                    malicious_count = entity.get('malicious_count', 0)
-                    suspicious_count = entity.get('suspicious_count', 0)
-                    context_parts.append(
-                        f"{entity_type}: {entity_value} "
-                        f"(Malicious: {malicious_count}, Suspicious: {suspicious_count})"
-                    )
+                context_parts.append("\nMalicious Network Entities:")
+                for entity in (ip_threats + domain_threats)[:5]:
+                    mal = entity.get('malicious_count', 0)
+                    sus = entity.get('suspicious_count', 0)
+                    context_parts.append(f"  {entity.get('entity_type', '').upper()}: {entity.get('entity_value', 'N/A')} [{mal} malicious, {sus} suspicious]")
 
+        suspicious_http = []
         if summary_data.get('http_sessions'):
-            context_parts.append("\n=== HTTP SESSIONS (Sample) ===")
-            for session in summary_data['http_sessions'][:5]:
-                host = session.get('host', 'N/A')
-                method = session.get('method', 'N/A')
-                uri = session.get('uri', 'N/A')
-                context_parts.append(f"{method} {host}{uri}")
+            for session in summary_data['http_sessions'][:20]:
+                uri = session.get('uri', '')
+                host = session.get('host', '')
+                if any(ext in uri.lower() for ext in ['.exe', '.dll', '.bat', '.ps1', '.sh']) or session.get('dst_port') not in ['80', '443']:
+                    suspicious_http.append(session)
 
+        if suspicious_http:
+            context_parts.append("\n=== SUSPICIOUS HTTP ACTIVITY ===")
+            for session in suspicious_http[:5]:
+                context_parts.append(f"{session.get('method', 'GET')} {session.get('host', 'N/A')}{session.get('uri', '')} [{session.get('timestamp', 'N/A')}]")
+
+        suspicious_dns = []
         if summary_data.get('dns_queries'):
-            context_parts.append("\n=== DNS QUERIES (Sample) ===")
-            for query in summary_data['dns_queries'][:10]:
-                query_name = query.get('query_name', 'N/A')
-                context_parts.append(f"Query: {query_name}")
+            for query in summary_data['dns_queries'][:30]:
+                qname = query.get('query_name', '').lower()
+                if any(tld in qname for tld in ['.tk', '.ml', '.ga', '.cf', '.info', '.xyz']) or qname.replace('.', '').isdigit():
+                    suspicious_dns.append(query)
 
-        context_parts.append("\n=== TOP NETWORK FLOWS (with Metadata) ===")
-        for flow, metadata in list(summary_data.get('top_flows', {}).items())[:10]:
-            if isinstance(metadata, dict):
-                flow_info = f"{flow}: {metadata.get('packet_count', 0)} packets, {metadata.get('total_bytes', 0)} bytes"
-                if metadata.get('first_seen') and metadata.get('last_seen'):
-                    flow_info += f", Duration: {metadata['first_seen']} to {metadata['last_seen']}"
-                context_parts.append(flow_info)
-            else:
-                context_parts.append(f"{flow}: {metadata} packets")
-
-        if summary_data.get('tcp_connections'):
-            context_parts.append("\n=== TCP CONNECTION STATES (Sample) ===")
-            for conn in summary_data['tcp_connections'][:10]:
-                conn_info = f"{conn.get('src_ip', 'N/A')}:{conn.get('src_port', 'N/A')} -> {conn.get('dst_ip', 'N/A')}:{conn.get('dst_port', 'N/A')}"
-                conn_info += f" | State: {conn.get('state', 'UNKNOWN')}"
-                if conn.get('established_timestamp'):
-                    conn_info += f" | Established: {conn['established_timestamp']}"
-                if conn.get('first_seen'):
-                    conn_info += f" | First: {conn['first_seen']}"
-                context_parts.append(conn_info)
+        if suspicious_dns:
+            context_parts.append("\n=== SUSPICIOUS DNS QUERIES ===")
+            for query in suspicious_dns[:8]:
+                context_parts.append(f"{query.get('query_name', 'N/A')} [{query.get('timestamp', 'N/A')}]")
 
         if summary_data.get('file_transfers'):
-            context_parts.append("\n=== FILE TRANSFER INDICATORS ===")
-            for transfer in summary_data['file_transfers'][:10]:
-                transfer_info = f"[{transfer.get('timestamp', 'N/A')}] {transfer.get('direction', 'unknown').upper()}"
-                if transfer.get('url'):
-                    transfer_info += f" from {transfer['url']}"
-                elif transfer.get('host'):
-                    transfer_info += f" from {transfer['host']}"
-                if transfer.get('file_size'):
-                    transfer_info += f" | Size: {transfer['file_size']} bytes"
-                if transfer.get('content_type'):
-                    transfer_info += f" | Type: {transfer['content_type']}"
-                context_parts.append(transfer_info)
+            context_parts.append("\n=== FILE TRANSFERS ===")
+            for transfer in summary_data['file_transfers'][:5]:
+                direction = transfer.get('direction', 'unknown').upper()
+                url = transfer.get('url', transfer.get('host', 'N/A'))
+                size = transfer.get('file_size', 'unknown')
+                ctype = transfer.get('content_type', 'unknown')
+                time = transfer.get('timestamp', 'N/A')
+                context_parts.append(f"[{time}] {direction} from {url} | {size} bytes | {ctype}")
+
+        top_flows = list(summary_data.get('top_flows', {}).items())[:8]
+        if top_flows:
+            context_parts.append("\n=== TOP NETWORK FLOWS ===")
+            for flow, metadata in top_flows:
+                if isinstance(metadata, dict):
+                    packets = metadata.get('packet_count', 0)
+                    bytes_total = metadata.get('total_bytes', 0)
+                    context_parts.append(f"{flow}: {packets} pkts, {bytes_total} bytes")
+                else:
+                    context_parts.append(f"{flow}: {metadata} packets")
 
         return "\n".join(context_parts)
 
@@ -766,6 +760,192 @@ Just ask your question naturally, and I'll search through the network traffic an
                     return True
 
         return False
+
+    def _enrich_query_with_session_memory(self, query: str, session_memory: Dict[str, Any]) -> str:
+        """Enrich query with session memory context for better follow-up handling."""
+        if not session_memory['exchanges']:
+            return query
+
+        if not self._is_short_followup(query):
+            return query
+
+        last_exchange = session_memory['exchanges'][-1]
+        last_user_query = last_exchange.get('user', '')
+        last_mentioned_entities = last_exchange.get('entities', {})
+
+        query_lower = query.lower().strip()
+
+        if query_lower in ['yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay']:
+            enriched = f"""[CONVERSATION CONTEXT: User previously asked: "{last_user_query}". User now says "{query}" - they want MORE DETAILS about that topic.]
+
+Provide more detailed information about: {last_user_query}"""
+            return enriched
+
+        elif query_lower in ['continue', 'more', 'tell me more', 'go on', 'keep going', 'details', 'elaborate']:
+            enriched = f"""[CONVERSATION CONTEXT: User previously asked: "{last_user_query}". User wants continuation.]
+
+Continue with more details about: {last_user_query}"""
+            return enriched
+
+        elif any(ref in query_lower for ref in ['this ip', 'that ip', 'the ip']):
+            if last_mentioned_entities.get('ips'):
+                ip = last_mentioned_entities['ips'][-1]
+                enriched = f"""[CONVERSATION CONTEXT: User is referring to IP {ip} from previous discussion.]
+
+User's question about IP {ip}: {query}"""
+                return enriched
+
+        elif any(ref in query_lower for ref in ['this domain', 'that domain', 'the domain']):
+            if last_mentioned_entities.get('domains'):
+                domain = last_mentioned_entities['domains'][-1]
+                enriched = f"""[CONVERSATION CONTEXT: User is referring to domain {domain} from previous discussion.]
+
+User's question about domain {domain}: {query}"""
+                return enriched
+
+        return f"""[CONVERSATION CONTEXT: Previous question was: "{last_user_query}"]
+
+Current follow-up: {query}"""
+
+    def _format_session_memory_context(self, session_memory: Dict[str, Any]) -> str:
+        """Format session memory for prompt context."""
+        if not session_memory['exchanges']:
+            return ""
+
+        parts = ["=== SESSION MEMORY (Last 5 Exchanges) ==="]
+        recent = session_memory['exchanges'][-5:]
+
+        for i, exchange in enumerate(recent, 1):
+            parts.append(f"\nExchange {i}:")
+            parts.append(f"User: {exchange['user'][:100]}...")
+            parts.append(f"You: {exchange['assistant'][:150]}...")
+
+        if session_memory['entities_mentioned']['ips']:
+            parts.append(f"\nIPs discussed: {', '.join(session_memory['entities_mentioned']['ips'][:10])}")
+
+        if session_memory['entities_mentioned']['domains']:
+            parts.append(f"Domains discussed: {', '.join(session_memory['entities_mentioned']['domains'][:10])}")
+
+        if session_memory['vt_findings_shared']:
+            parts.append(f"\nVirusTotal findings already shared for: {', '.join(list(session_memory['vt_findings_shared'])[:5])}")
+
+        parts.append("===\n")
+        return "\n".join(parts)
+
+    def _update_session_memory(self, session_memory: Dict[str, Any], query: str, response: str, summary_data: Dict[str, Any]):
+        """Update session memory with new exchange and extract entities."""
+        import re
+
+        exchange = {
+            'user': query,
+            'assistant': response,
+            'entities': {'ips': [], 'domains': []}
+        }
+
+        ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
+        ips_in_query = re.findall(ip_pattern, query)
+        ips_in_response = re.findall(ip_pattern, response)
+
+        all_ips = list(set(ips_in_query + ips_in_response))
+        for ip in all_ips:
+            if ip not in session_memory['entities_mentioned']['ips']:
+                session_memory['entities_mentioned']['ips'].append(ip)
+            exchange['entities']['ips'].append(ip)
+
+        domain_pattern = r'\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}\b'
+        domains_in_query = re.findall(domain_pattern, query.lower())
+        domains_in_response = re.findall(domain_pattern, response.lower())
+
+        all_domains = list(set(domains_in_query + domains_in_response))
+        for domain in all_domains:
+            if domain not in session_memory['entities_mentioned']['domains']:
+                session_memory['entities_mentioned']['domains'].append(domain)
+            exchange['entities']['domains'].append(domain)
+
+        for ip in all_ips:
+            if self._is_vt_finding_mentioned(ip, summary_data):
+                session_memory['vt_findings_shared'].add(ip)
+
+        for domain in all_domains:
+            if self._is_vt_finding_mentioned(domain, summary_data):
+                session_memory['vt_findings_shared'].add(domain)
+
+        session_memory['exchanges'].append(exchange)
+
+        if len(session_memory['exchanges']) > 10:
+            session_memory['exchanges'].pop(0)
+
+    def _is_vt_finding_mentioned(self, entity: str, summary_data: Dict[str, Any]) -> bool:
+        """Check if an entity has VirusTotal findings in the summary."""
+        vt_results = summary_data.get('virustotal_results', {})
+        flagged = vt_results.get('flagged_entities', [])
+
+        for item in flagged:
+            if item.get('entity_value') == entity:
+                return True
+        return False
+
+    def _extract_malware_timeline(self, summary_data: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Extract chronological timeline of suspicious events for malware analysis."""
+        events = []
+
+        vt_results = summary_data.get('virustotal_results', {})
+        flagged_entities = {item['entity_value']: item for item in vt_results.get('flagged_entities', [])}
+
+        tcp_conns = summary_data.get('tcp_connections', [])
+        for conn in tcp_conns[:20]:
+            dst_ip = conn.get('dst_ip', '')
+            if dst_ip in flagged_entities:
+                mal_count = flagged_entities[dst_ip].get('malicious_count', 0)
+                if mal_count > 0:
+                    events.append({
+                        'time': conn.get('first_seen', 'N/A'),
+                        'type': 'malicious_connection',
+                        'description': f"Connection to malicious IP {dst_ip} (flagged by {mal_count} vendors)"
+                    })
+
+        for transfer in summary_data.get('file_transfers', [])[:15]:
+            uri = transfer.get('uri', '').lower()
+            host = transfer.get('host', '')
+            if any(ext in uri for ext in ['.exe', '.dll', '.bat', '.ps1', '.sh', '.vbs']):
+                desc = f"File download: {host}{uri[:50]}"
+                if host in flagged_entities:
+                    mal_count = flagged_entities[host].get('malicious_count', 0)
+                    desc += f" (from malicious domain, {mal_count} vendors)"
+                events.append({
+                    'time': transfer.get('timestamp', 'N/A'),
+                    'type': 'file_download',
+                    'description': desc
+                })
+
+        for http in summary_data.get('http_sessions', [])[:20]:
+            host = http.get('host', '')
+            uri = http.get('uri', '')
+            if host in flagged_entities and flagged_entities[host].get('malicious_count', 0) > 0:
+                mal_count = flagged_entities[host].get('malicious_count', 0)
+                events.append({
+                    'time': http.get('timestamp', 'N/A'),
+                    'type': 'malicious_http',
+                    'description': f"HTTP {http.get('method', 'GET')} to malicious domain {host} (flagged by {mal_count} vendors)"
+                })
+
+        for dns in summary_data.get('dns_queries', [])[:20]:
+            qname = dns.get('query_name', '').lower()
+            if any(tld in qname for tld in ['.tk', '.ml', '.ga', '.cf']) or qname in flagged_entities:
+                desc = f"DNS query for {qname}"
+                if qname in flagged_entities:
+                    mal_count = flagged_entities[qname].get('malicious_count', 0)
+                    if mal_count > 0:
+                        desc += f" (malicious, {mal_count} vendors)"
+                events.append({
+                    'time': dns.get('timestamp', 'N/A'),
+                    'type': 'suspicious_dns',
+                    'description': desc
+                })
+
+        events.sort(key=lambda x: x['time'])
+
+        return events
 
     def _enrich_query_with_context(self, query: str, chat_history: List[Dict[str, str]]) -> str:
         if not chat_history or len(chat_history) == 0:
