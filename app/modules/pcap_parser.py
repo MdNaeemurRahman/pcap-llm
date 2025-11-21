@@ -1576,7 +1576,17 @@ class PCAPParser:
                 'kerberos_users': {},
                 'smb_sessions': {},
                 'mac_to_ip': {},
-                'host_profiles': {}
+                'host_profiles': {},
+                # Behavioral IOC tracking (must match structure in generate_full_json)
+                'http_uploads': [],
+                'smb_file_access': [],
+                'sensitive_file_access': [],
+                'c2_connections': [],
+                'exfiltration_summary': {
+                    'total_bytes_uploaded': 0,
+                    'upload_count': 0,
+                    'destinations': set()
+                }
             }
 
             # Rebuild forensic trackers from packets
@@ -1656,6 +1666,39 @@ class PCAPParser:
                             forensic_trackers['smb_sessions'][src_ip]['domain'] = smb['domain']
                         if smb.get('user_name') and smb['user_name'] not in forensic_trackers['smb_sessions'][src_ip]['users']:
                             forensic_trackers['smb_sessions'][src_ip]['users'].append(smb['user_name'])
+
+                        # Track sensitive file access
+                        if smb.get('is_sensitive') and smb.get('file_name'):
+                            forensic_trackers['sensitive_file_access'].append({
+                                'timestamp': timestamp,
+                                'src_ip': src_ip,
+                                'file_path': smb['file_name'],
+                                'category': smb.get('file_category', 'unknown'),
+                                'pattern_matched': smb.get('file_name'),  # Store the file name as pattern
+                                'protocol': 'SMB'
+                            })
+
+                # Extract HTTP upload data for exfiltration tracking
+                if 'http' in packet:
+                    http = packet['http']
+                    if http.get('suspected_exfiltration'):
+                        src_ip = packet.get('ip', {}).get('src')
+                        dst_ip = packet.get('ip', {}).get('dst')
+                        upload_size = http.get('upload_size', 0)
+
+                        if src_ip and dst_ip:
+                            forensic_trackers['http_uploads'].append({
+                                'timestamp': timestamp,
+                                'src_ip': src_ip,
+                                'dst_ip': dst_ip,
+                                'size': upload_size,
+                                'url': f"{http.get('host', '')}{http.get('uri', '')}",
+                                'content_type': http.get('content_type'),
+                                'method': http.get('method', 'POST')
+                            })
+                            forensic_trackers['exfiltration_summary']['total_bytes_uploaded'] += upload_size
+                            forensic_trackers['exfiltration_summary']['upload_count'] += 1
+                            forensic_trackers['exfiltration_summary']['destinations'].add(dst_ip)
 
         # Build ARP table
         for ip, arp_data in forensic_trackers['arp_table'].items():
@@ -1841,7 +1884,8 @@ class PCAPParser:
         # Classify attack pattern
         attack_classification = self._classify_attack_pattern(forensic_trackers, forensic_analysis)
 
-        # Build behavioral IOCs section
+        # Build behavioral IOCs section with safe dictionary access
+        exfil_summary = forensic_trackers.get('exfiltration_summary', {})
         forensic_analysis['behavioral_iocs'] = {
             'attack_type': attack_classification['attack_type'],
             'confidence': attack_classification['confidence'],
@@ -1850,9 +1894,9 @@ class PCAPParser:
             'targeted_applications': attack_classification['targeted_applications'],
             'files_accessed': forensic_trackers.get('sensitive_file_access', []),
             'exfiltration_summary': {
-                'total_bytes_uploaded': forensic_trackers['exfiltration_summary']['total_bytes_uploaded'],
-                'upload_count': forensic_trackers['exfiltration_summary']['upload_count'],
-                'destinations': list(forensic_trackers['exfiltration_summary']['destinations']),
+                'total_bytes_uploaded': exfil_summary.get('total_bytes_uploaded', 0),
+                'upload_count': exfil_summary.get('upload_count', 0),
+                'destinations': list(exfil_summary.get('destinations', set())),
                 'uploads': forensic_trackers.get('http_uploads', [])
             },
             'c2_communication': c2_analysis
@@ -1861,8 +1905,8 @@ class PCAPParser:
         print(f"[PCAP Parser] Attack classified as: {attack_classification['attack_type']} (confidence: {attack_classification['confidence']*100:.0f}%)")
         if attack_classification['stolen_data_types']:
             print(f"[PCAP Parser] Stolen data types detected: {', '.join(attack_classification['stolen_data_types'])}")
-        if forensic_trackers['exfiltration_summary']['upload_count'] > 0:
-            print(f"[PCAP Parser] Data exfiltration detected: {forensic_trackers['exfiltration_summary']['upload_count']} uploads, {forensic_trackers['exfiltration_summary']['total_bytes_uploaded']} bytes total")
+        if exfil_summary.get('upload_count', 0) > 0:
+            print(f"[PCAP Parser] Data exfiltration detected: {exfil_summary['upload_count']} uploads, {exfil_summary['total_bytes_uploaded']} bytes total")
 
         return forensic_analysis
 
