@@ -394,14 +394,20 @@ class PCAPParser:
 
         return file_transfers[:50]
 
-    def generate_summary_json(self, output_path: str) -> Dict[str, Any]:
-        """Generate summary using optimized single-pass extraction with caching."""
+    def generate_summary_json(self, output_path: str, vt_results: Any = None) -> Dict[str, Any]:
+        """Generate summary using optimized single-pass extraction with caching.
+
+        Args:
+            output_path: Path to save the summary JSON
+            vt_results: Optional VirusTotal results for infected host identification
+        """
         file_hash = self.compute_file_hash()
         cache_dir = Path(output_path).parent / 'cache'
         cache_dir.mkdir(exist_ok=True)
         cache_file = cache_dir / f"{file_hash}_summary.json"
 
-        if cache_file.exists():
+        # Skip cache if VT results are provided (need fresh analysis)
+        if cache_file.exists() and vt_results is None:
             print(f"[PCAP Parser] Cache hit! Loading cached summary for {file_hash[:16]}...")
             try:
                 with open(cache_file, 'r') as f:
@@ -441,15 +447,28 @@ class PCAPParser:
             }
         }
 
+        # Enrich forensic profile with VT data if available
+        if vt_results and all_data.get('forensic_profile'):
+            print("[PCAP Parser] Enriching forensic profile with VirusTotal threat intelligence...")
+            summary['forensic_profile'] = self._enrich_forensic_profile_with_vt(
+                all_data['forensic_profile'],
+                all_data,
+                vt_results
+            )
+        elif all_data.get('forensic_profile'):
+            summary['forensic_profile'] = all_data['forensic_profile']
+
         with open(output_path, 'w') as f:
             json.dump(summary, f, indent=2)
 
-        try:
-            with open(cache_file, 'w') as f:
-                json.dump(summary, f, indent=2)
-            print(f"[PCAP Parser] Summary cached at: {cache_file}")
-        except Exception as e:
-            print(f"[PCAP Parser] Warning: Failed to cache summary: {str(e)}")
+        # Only cache if no VT results (cache invalidation on VT update)
+        if vt_results is None:
+            try:
+                with open(cache_file, 'w') as f:
+                    json.dump(summary, f, indent=2)
+                print(f"[PCAP Parser] Summary cached at: {cache_file}")
+            except Exception as e:
+                print(f"[PCAP Parser] Warning: Failed to cache summary: {str(e)}")
 
         print(f"[PCAP Parser] Summary generated: {all_data['total_packets']} packets processed")
         return summary
@@ -805,6 +824,130 @@ class PCAPParser:
         print(f"[PCAP Parser] Single-pass complete: {data['total_packets']} packets, {len(data['unique_ips'])} IPs, {len(data['unique_domains'])} domains")
 
         return data
+
+    def _enrich_forensic_profile_with_vt(
+        self,
+        forensic_profile: Dict[str, Any],
+        all_data: Dict[str, Any],
+        vt_results: Any
+    ) -> Dict[str, Any]:
+        """Enrich the forensic profile with VirusTotal data to identify infected host."""
+        if not forensic_profile or not vt_results:
+            return forensic_profile
+
+        infected_host = forensic_profile.get('infected_host', {})
+        if not infected_host:
+            return forensic_profile
+
+        # Normalize VT results to expected format
+        vt_results = self._normalize_vt_results(vt_results)
+
+        # Build list of malicious IPs and domains from VT results
+        malicious_ips = []
+        malicious_domains = []
+
+        if isinstance(vt_results, dict) and 'results' in vt_results:
+            # Get malicious IPs from VT results
+            if 'ip' in vt_results['results']:
+                for vt_ip, vt_data in vt_results['results']['ip'].items():
+                    if vt_data.get('malicious', 0) > 0:
+                        malicious_ips.append(vt_ip)
+
+            # Get malicious domains from VT results
+            if 'domain' in vt_results['results']:
+                for vt_domain, vt_data in vt_results['results']['domain'].items():
+                    if vt_data.get('malicious', 0) > 0:
+                        malicious_domains.append(vt_domain)
+
+        print(f"[PCAP Parser] Found {len(malicious_ips)} malicious IPs and {len(malicious_domains)} malicious domains from VT")
+
+        # Identify which internal IPs connected to malicious entities
+        internal_ips_with_malicious_connections = {}
+
+        def is_internal_ip(ip: str) -> bool:
+            if ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('172.'):
+                octets = ip.split('.')
+                if ip.startswith('172.') and len(octets) == 4:
+                    try:
+                        second_octet = int(octets[1])
+                        return 16 <= second_octet <= 31
+                    except:
+                        return False
+                return True
+            return False
+
+        # Check HTTP sessions for connections to malicious hosts
+        for session in all_data.get('http_sessions', []):
+            src_ip = session.get('src_ip')
+            dst_ip = session.get('dst_ip')
+            host = session.get('host', '')
+
+            if src_ip and is_internal_ip(src_ip):
+                # Check if connecting to malicious IP or domain
+                if dst_ip in malicious_ips or host in malicious_domains:
+                    if src_ip not in internal_ips_with_malicious_connections:
+                        internal_ips_with_malicious_connections[src_ip] = []
+                    internal_ips_with_malicious_connections[src_ip].append({
+                        'type': 'http',
+                        'dst_ip': dst_ip,
+                        'host': host,
+                        'timestamp': session.get('timestamp', 'N/A')
+                    })
+
+        # Check TCP connections
+        for conn in all_data.get('tcp_connections', []):
+            src_ip = conn.get('src_ip')
+            dst_ip = conn.get('dst_ip')
+
+            if src_ip and is_internal_ip(src_ip) and dst_ip in malicious_ips:
+                if src_ip not in internal_ips_with_malicious_connections:
+                    internal_ips_with_malicious_connections[src_ip] = []
+                internal_ips_with_malicious_connections[src_ip].append({
+                    'type': 'tcp',
+                    'dst_ip': dst_ip,
+                    'timestamp': conn.get('first_seen', 'N/A')
+                })
+
+        # Check DNS queries
+        for query in all_data.get('dns_queries', []):
+            src_ip = query.get('src_ip')
+            query_name = query.get('query_name', '')
+
+            if src_ip and is_internal_ip(src_ip) and query_name in malicious_domains:
+                if src_ip not in internal_ips_with_malicious_connections:
+                    internal_ips_with_malicious_connections[src_ip] = []
+                internal_ips_with_malicious_connections[src_ip].append({
+                    'type': 'dns',
+                    'query': query_name,
+                    'timestamp': query.get('timestamp', 'N/A')
+                })
+
+        # If we found internal IPs with malicious connections, update the infected host
+        if internal_ips_with_malicious_connections:
+            # Find the IP with most malicious connections (most likely infected)
+            most_infected_ip = max(
+                internal_ips_with_malicious_connections.keys(),
+                key=lambda ip: len(internal_ips_with_malicious_connections[ip])
+            )
+
+            print(f"[PCAP Parser] Identified infected host: {most_infected_ip} (with {len(internal_ips_with_malicious_connections[most_infected_ip])} malicious connections)")
+
+            # Update the infected_host in forensic profile if we have better candidate
+            current_ip = infected_host.get('ip')
+            if most_infected_ip != current_ip:
+                print(f"[PCAP Parser] Updating infected host from {current_ip} to {most_infected_ip} based on VT analysis")
+
+                # Try to get forensic data for the correct infected host
+                # This requires re-scanning the internal hosts from _single_pass_extract
+                # For now, update the IP and keep other data if we don't have it
+                forensic_profile['infected_host']['ip'] = most_infected_ip
+
+            # Add malicious connections info
+            forensic_profile['infected_host']['malicious_connections_count'] = len(internal_ips_with_malicious_connections[most_infected_ip])
+            forensic_profile['infected_host']['malicious_connections'] = internal_ips_with_malicious_connections[most_infected_ip][:10]  # First 10
+            forensic_profile['infected_host']['is_confirmed_infected'] = True
+
+        return forensic_profile
 
     def generate_full_json(self, output_path: str, vt_results: Any = None) -> Dict[str, Any]:
         if not self.capture:
@@ -1237,8 +1380,72 @@ class PCAPParser:
 
         return full_data
 
+    def _normalize_vt_results(self, vt_results: Any) -> Dict[str, Any]:
+        """Normalize VT results to consistent dict format with 'results' key.
+
+        Handles both list format from batch_query_entities() and dict format.
+        Returns: {results: {ip: {addr: {...}}, domain: {name: {...}}, file: {hash: {...}}}}
+        """
+        if isinstance(vt_results, dict) and 'results' in vt_results:
+            # Already in correct format
+            return vt_results
+
+        if isinstance(vt_results, list):
+            # Convert list format to nested dict format
+            normalized = {
+                'results': {
+                    'ip': {},
+                    'domain': {},
+                    'file': {}
+                }
+            }
+
+            for item in vt_results:
+                if not isinstance(item, dict):
+                    continue
+
+                entity_type = item.get('entity_type')
+                entity_value = item.get('entity_value')
+
+                if not entity_type or not entity_value:
+                    continue
+
+                # Map list format to dict format
+                entity_data = {
+                    'malicious': item.get('malicious_count', 0),
+                    'suspicious': item.get('suspicious_count', 0),
+                    'harmless': item.get('harmless_count', 0),
+                    'undetected': item.get('undetected_count', 0),
+                    'threat_label': item.get('threat_label', 'Unknown'),
+                    'categories': []
+                }
+
+                # Add type-specific data
+                if entity_type == 'domain' and item.get('category'):
+                    entity_data['categories'] = list(item['category'].values()) if isinstance(item['category'], dict) else []
+
+                if entity_type == 'file':
+                    entity_data['detection_engines'] = item.get('detection_engines', [])
+                    entity_data['threat_category'] = item.get('threat_category', [])
+                    entity_data['sandbox_verdicts'] = item.get('sandbox_verdicts', [])
+
+                # Add to normalized structure
+                if entity_type in normalized['results']:
+                    normalized['results'][entity_type][entity_value] = entity_data
+
+            print(f"[PCAP Parser] Normalized VT results: {len(normalized['results']['ip'])} IPs, {len(normalized['results']['domain'])} domains, {len(normalized['results']['file'])} files")
+            return normalized
+
+        # Return empty structure if invalid format
+        return {'results': {'ip': {}, 'domain': {}, 'file': {}}}
+
     def _aggregate_forensic_metadata(self, all_packets: List[Dict], forensic_trackers: Dict, stats: Dict, vt_results: Any = None) -> Dict[str, Any]:
         """Aggregate forensic metadata from all collected tracking data."""
+        # Normalize VT results to expected format
+        if vt_results:
+            vt_results = self._normalize_vt_results(vt_results)
+            print(f"[PCAP Parser] VT results normalized for forensic analysis")
+
         forensic_analysis = {
             'hosts': {},
             'arp_table': {},

@@ -68,6 +68,19 @@ class AnalysisPipeline:
 
             enriched_summary = self.vt_client.enrich_json_with_vt(summary, vt_results)
 
+            # Re-enrich forensic profile with VT data for accurate infected host identification
+            if enriched_summary.get('forensic_profile'):
+                print("Re-identifying infected host using VirusTotal threat intelligence...")
+                enriched_summary['forensic_profile'] = parser._enrich_forensic_profile_with_vt(
+                    enriched_summary['forensic_profile'],
+                    {
+                        'http_sessions': enriched_summary.get('http_sessions', []),
+                        'tcp_connections': enriched_summary.get('tcp_connections', []),
+                        'dns_queries': enriched_summary.get('dns_queries', [])
+                    },
+                    vt_results
+                )
+
             enriched_output = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
             with open(enriched_output, 'w') as f:
                 json.dump(enriched_summary, f, indent=2)
@@ -227,6 +240,19 @@ class AnalysisPipeline:
             print(f"Saved VirusTotal results to: {vt_output}")
 
             enriched_summary = self.vt_client.enrich_json_with_vt(summary, vt_results)
+
+            # Re-enrich forensic profile with VT data for accurate infected host identification
+            if enriched_summary.get('forensic_profile'):
+                print("Re-identifying infected host using VirusTotal threat intelligence...")
+                enriched_summary['forensic_profile'] = parser._enrich_forensic_profile_with_vt(
+                    enriched_summary['forensic_profile'],
+                    {
+                        'http_sessions': enriched_summary.get('http_sessions', []),
+                        'tcp_connections': enriched_summary.get('tcp_connections', []),
+                        'dns_queries': enriched_summary.get('dns_queries', [])
+                    },
+                    vt_results
+                )
 
             enriched_output = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
             with open(enriched_output, 'w') as f:
