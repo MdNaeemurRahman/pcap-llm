@@ -214,8 +214,8 @@ The tool uses Supabase with the following tables:
 ## Troubleshooting
 
 ### Ollama Connection Failed
-- Ensure Ollama is running at 
-- Test connection: `curl http://IP/api/tags`
+- Ensure Ollama is running at http://130.232.102.188:11434
+- Test connection: `curl http://130.232.102.188:11434/api/tags`
 - Verify firewall rules allow connections
 
 ### VirusTotal Rate Limits

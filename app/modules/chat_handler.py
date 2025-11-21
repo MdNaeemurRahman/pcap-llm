@@ -6,6 +6,7 @@ from .vector_store import VectorStoreManager
 from .supabase_client import SupabaseManager
 from .query_classifier import QueryClassifier
 from .tshark_agent import TSharkAgent
+from .compact_formatter import CompactFormatter
 
 class ChatHandler:
     def __init__(
@@ -22,6 +23,7 @@ class ChatHandler:
         self.classifier = QueryClassifier()
         self.tshark_agent = TSharkAgent(ollama_client)
         self.option3_agents = {}
+        self.compact_formatter = CompactFormatter()
 
     def handle_option1_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
@@ -48,7 +50,8 @@ class ChatHandler:
             with open(summary_file, 'r') as f:
                 summary_data = json.load(f)
 
-            context = self._format_summary_context(summary_data)
+            # Use compact formatter for enhanced summaries (50% token reduction)
+            context = self.compact_formatter.format_enhanced_summary_for_llm(summary_data)
 
             chat_history = self.supabase.get_chat_history(analysis_id)
             formatted_history = [

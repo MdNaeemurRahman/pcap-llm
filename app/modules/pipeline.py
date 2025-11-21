@@ -7,6 +7,7 @@ from .text_chunker import TextChunker
 from .ollama_client import OllamaClient
 from .vector_store import VectorStoreManager
 from .supabase_client import SupabaseManager
+from .summary_generator import EnhancedSummaryGenerator
 
 
 class AnalysisPipeline:
@@ -25,6 +26,7 @@ class AnalysisPipeline:
         self.vector_store = vector_store
         self.uploads_dir = Path(uploads_dir)
         self.json_outputs_dir = Path(json_outputs_dir)
+        self.summary_generator = EnhancedSummaryGenerator()
 
     def process_option1(self, file_path: str, filename: str, analysis_id: str) -> Dict[str, Any]:
         try:
@@ -66,14 +68,19 @@ class AnalysisPipeline:
                 json.dump(vt_results, f, indent=2)
             print(f"Saved VirusTotal results to: {vt_output}")
 
-            enriched_summary = self.vt_client.enrich_json_with_vt(summary, vt_results)
+            self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
+
+            print("Generating enhanced summary with intelligent prioritization...")
+            enhanced_summary = self.summary_generator.generate_enhanced_summary(summary, vt_results)
 
             enriched_output = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
             with open(enriched_output, 'w') as f:
-                json.dump(enriched_summary, f, indent=2)
+                json.dump(enhanced_summary, f, indent=2)
+            print(f"Saved enhanced summary to: {enriched_output}")
 
-            self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
-
+            # Update stats with threat information
+            stats['threat_ips_count'] = enhanced_summary['statistics'].get('threat_ips_count', 0)
+            stats['threat_domains_count'] = enhanced_summary['statistics'].get('threat_domains_count', 0)
             self.supabase.update_analysis_status(analysis_id, 'ready', stats, current_mode='option1')
 
             print("=== Option 1 Analysis Complete ===\n")
@@ -81,7 +88,7 @@ class AnalysisPipeline:
             return {
                 'status': 'success',
                 'analysis_id': analysis_id,
-                'summary': enriched_summary,
+                'summary': enhanced_summary,
                 'vt_results': vt_results
             }
 
@@ -215,17 +222,22 @@ class AnalysisPipeline:
                 json.dump(vt_results, f, indent=2)
             print(f"Saved VirusTotal results to: {vt_output}")
 
-            enriched_summary = self.vt_client.enrich_json_with_vt(summary, vt_results)
+            self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
+
+            print("Generating enhanced summary with intelligent prioritization...")
+            enhanced_summary = self.summary_generator.generate_enhanced_summary(summary, vt_results)
 
             enriched_output = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
             with open(enriched_output, 'w') as f:
-                json.dump(enriched_summary, f, indent=2)
-
-            self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
+                json.dump(enhanced_summary, f, indent=2)
+            print(f"Saved enhanced summary to: {enriched_output}")
 
             self.supabase.store_pcap_file_path(analysis_id, file_path)
             print(f"Stored PCAP file path for TShark queries: {file_path}")
 
+            # Update stats with threat information
+            stats['threat_ips_count'] = enhanced_summary['statistics'].get('threat_ips_count', 0)
+            stats['threat_domains_count'] = enhanced_summary['statistics'].get('threat_domains_count', 0)
             self.supabase.update_analysis_status(analysis_id, 'ready', stats, current_mode='option3')
 
             print("=== Option 3 Analysis Complete - Ready for Agentic Queries ===\n")
@@ -233,7 +245,7 @@ class AnalysisPipeline:
             return {
                 'status': 'success',
                 'analysis_id': analysis_id,
-                'summary': enriched_summary,
+                'summary': enhanced_summary,
                 'vt_results': vt_results,
                 'pcap_file_path': file_path
             }
