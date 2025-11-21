@@ -124,6 +124,13 @@ class ChatHandler:
 
             query_classification = self.classifier.classify_query(query)
 
+            # Add forensic query detection
+            query_lower = query.lower()
+            forensic_keywords = ['infected', 'compromised', 'victim', 'windows client', 'host', 'mac address',
+                               'hostname', 'computer name', 'user account', 'username', 'patient zero',
+                               'attacked', 'malware', 'trojan', 'compromised machine']
+            query_classification['is_forensic_query'] = any(keyword in query_lower for keyword in forensic_keywords)
+
             if query_classification['is_greeting']:
                 response = self._handle_greeting_query(query)
                 self.supabase.insert_chat_message(
@@ -173,10 +180,12 @@ class ChatHandler:
                 print("No relevant chunks found, falling back to summary-based response")
                 return self._handle_fallback_to_summary(analysis_id, query)
 
-            filtered_chunks = self._filter_chunks_by_relevance(search_results['chunks'], threshold=0.7)
+            # Use adaptive threshold based on query type
+            threshold = 0.6 if query_classification.get('is_forensic_query', False) else 0.65
+            filtered_chunks = self._filter_chunks_by_relevance(search_results['chunks'], threshold=threshold)
 
             if len(filtered_chunks) == 0:
-                print("All chunks filtered out due to low relevance, using fallback")
+                print(f"All chunks filtered out due to low relevance (threshold: {threshold}), using fallback")
                 return self._handle_fallback_to_summary(analysis_id, query)
 
             context = self._format_rag_context(filtered_chunks)
@@ -663,6 +672,16 @@ Just ask your question naturally, and I'll search through the network traffic an
 
         expansions = []
 
+        # HIGH PRIORITY: Infected host / forensic investigation queries
+        if any(term in query_lower for term in ['infected', 'compromised', 'victim', 'patient zero', 'attacked']):
+            if any(term in query_lower for term in ['windows', 'client', 'host', 'machine', 'computer', 'device']):
+                # This is asking about the infected Windows client - prioritize forensic metadata
+                expansions.append('INFECTED HOST IDENTIFIED infected compromised victim malicious activity threat')
+                expansions.append('IP Address MAC Address Hostname Computer Name Workstation')
+                expansions.append('Windows client internal host victim machine patient zero')
+                expansions.append('forensic investigation metadata host identification')
+                print(f"[Query Expansion] Detected infected Windows client query - adding high-priority forensic expansions")
+
         # Forensic keyword expansions (NEW - for Layer 2-7 data)
         if 'mac address' in query_lower or 'hardware address' in query_lower or 'physical address' in query_lower:
             expansions.append('MAC address hardware address physical address Ethernet address layer2 address ARP ether')
@@ -686,16 +705,16 @@ Just ask your question naturally, and I'll search through the network traffic an
             expansions.append('infection start infection time attack start initial compromise first malicious activity timeline')
 
         # Existing expansions
-        if 'file_analysis' in classification['topics']:
+        if 'file_analysis' in classification.get('topics', []):
             expansions.append('file transfer download upload HTTP')
 
-        if 'domain_analysis' in classification['topics']:
+        if 'domain_analysis' in classification.get('topics', []):
             expansions.append('DNS domain hostname')
 
-        if 'ip_analysis' in classification['topics']:
+        if 'ip_analysis' in classification.get('topics', []):
             expansions.append('IP address connection')
 
-        if classification['is_threat_focused']:
+        if classification.get('is_threat_focused', False):
             expansions.append('malicious threat VirusTotal security')
 
         if 'hash' in query_lower:
@@ -729,9 +748,15 @@ Just ask your question naturally, and I'll search through the network traffic an
         try:
             summary_file = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
             if not summary_file.exists():
+                fallback_message = ('I searched the network traffic but couldn\'t find specific data matching your query. '
+                                  'This could mean the information isn\'t in this capture, or you may need to rephrase. '
+                                  'Try asking about network statistics, threats, or general patterns.')
+                # Return success status with helpful message instead of error
                 return {
-                    'status': 'error',
-                    'message': 'I couldn\'t find relevant information to answer your specific question. The query might be too specific or use terms not present in the traffic data. Try asking about general statistics, threats, or rephrasing your question.'
+                    'status': 'success',
+                    'response': fallback_message,
+                    'mode': 'option2',
+                    'retrieved_chunks': None
                 }
 
             with open(summary_file, 'r') as f:
@@ -775,9 +800,13 @@ Just ask your question naturally, and I'll search through the network traffic an
 
         except Exception as e:
             print(f"Error in fallback handler: {str(e)}")
+            fallback_message = ('I encountered an issue while searching for information. '
+                              'Try asking about network statistics, threats, or rephrasing your question.')
             return {
-                'status': 'error',
-                'message': 'I couldn\'t find specific information to answer your question. Try asking about overall threats, statistics, or rephrasing your query.'
+                'status': 'success',
+                'response': fallback_message,
+                'mode': 'option2',
+                'retrieved_chunks': None
             }
 
     def _is_short_followup(self, query: str) -> bool:
