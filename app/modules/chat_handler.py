@@ -23,7 +23,6 @@ class ChatHandler:
         self.tshark_agent = TSharkAgent(ollama_client)
         self.option3_agents = {}
         self.option1_session_memory = {}
-        self.option2_entity_memory = {}  # Track entities mentioned in Option 2 conversations
 
     def handle_option1_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
@@ -125,13 +124,6 @@ class ChatHandler:
 
             query_classification = self.classifier.classify_query(query)
 
-            # Add forensic query detection
-            query_lower = query.lower()
-            forensic_keywords = ['infected', 'compromised', 'victim', 'windows client', 'host', 'mac address',
-                               'hostname', 'computer name', 'user account', 'username', 'patient zero',
-                               'attacked', 'malware', 'trojan', 'compromised machine']
-            query_classification['is_forensic_query'] = any(keyword in query_lower for keyword in forensic_keywords)
-
             if query_classification['is_greeting']:
                 response = self._handle_greeting_query(query)
                 self.supabase.insert_chat_message(
@@ -168,10 +160,7 @@ class ChatHandler:
                 for msg in chat_history[-5:]
             ]
 
-            # Resolve entity references from conversation memory
-            resolved_query = self._resolve_entity_references(query, analysis_id, formatted_history)
-
-            enriched_query = self._enrich_query_with_context(resolved_query, formatted_history)
+            enriched_query = self._enrich_query_with_context(query, formatted_history)
             expanded_query = self._expand_query(enriched_query, query_classification)
             print(f"Performing similarity search with query: '{expanded_query}'")
             search_results = self.vector_store.similarity_search(
@@ -184,12 +173,10 @@ class ChatHandler:
                 print("No relevant chunks found, falling back to summary-based response")
                 return self._handle_fallback_to_summary(analysis_id, query)
 
-            # Use adaptive threshold based on query type
-            threshold = 0.6 if query_classification.get('is_forensic_query', False) else 0.65
-            filtered_chunks = self._filter_chunks_by_relevance(search_results['chunks'], threshold=threshold)
+            filtered_chunks = self._filter_chunks_by_relevance(search_results['chunks'], threshold=0.7)
 
             if len(filtered_chunks) == 0:
-                print(f"All chunks filtered out due to low relevance (threshold: {threshold}), using fallback")
+                print("All chunks filtered out due to low relevance, using fallback")
                 return self._handle_fallback_to_summary(analysis_id, query)
 
             context = self._format_rag_context(filtered_chunks)
@@ -215,9 +202,6 @@ class ChatHandler:
                 }
                 for chunk in filtered_chunks
             ]
-
-            # Extract and store entities from the response for future reference resolution
-            self._extract_and_store_entities(analysis_id, query, response)
 
             self.supabase.insert_chat_message(
                 analysis_id=analysis_id,
@@ -679,16 +663,6 @@ Just ask your question naturally, and I'll search through the network traffic an
 
         expansions = []
 
-        # HIGH PRIORITY: Infected host / forensic investigation queries
-        if any(term in query_lower for term in ['infected', 'compromised', 'victim', 'patient zero', 'attacked']):
-            if any(term in query_lower for term in ['windows', 'client', 'host', 'machine', 'computer', 'device']):
-                # This is asking about the infected Windows client - prioritize forensic metadata
-                expansions.append('INFECTED HOST IDENTIFIED infected compromised victim malicious activity threat')
-                expansions.append('IP Address MAC Address Hostname Computer Name Workstation')
-                expansions.append('Windows client internal host victim machine patient zero')
-                expansions.append('forensic investigation metadata host identification')
-                print(f"[Query Expansion] Detected infected Windows client query - adding high-priority forensic expansions")
-
         # Forensic keyword expansions (NEW - for Layer 2-7 data)
         if 'mac address' in query_lower or 'hardware address' in query_lower or 'physical address' in query_lower:
             expansions.append('MAC address hardware address physical address Ethernet address layer2 address ARP ether')
@@ -712,16 +686,16 @@ Just ask your question naturally, and I'll search through the network traffic an
             expansions.append('infection start infection time attack start initial compromise first malicious activity timeline')
 
         # Existing expansions
-        if 'file_analysis' in classification.get('topics', []):
+        if 'file_analysis' in classification['topics']:
             expansions.append('file transfer download upload HTTP')
 
-        if 'domain_analysis' in classification.get('topics', []):
+        if 'domain_analysis' in classification['topics']:
             expansions.append('DNS domain hostname')
 
-        if 'ip_analysis' in classification.get('topics', []):
+        if 'ip_analysis' in classification['topics']:
             expansions.append('IP address connection')
 
-        if classification.get('is_threat_focused', False):
+        if classification['is_threat_focused']:
             expansions.append('malicious threat VirusTotal security')
 
         if 'hash' in query_lower:
@@ -755,15 +729,9 @@ Just ask your question naturally, and I'll search through the network traffic an
         try:
             summary_file = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
             if not summary_file.exists():
-                fallback_message = ('I searched the network traffic but couldn\'t find specific data matching your query. '
-                                  'This could mean the information isn\'t in this capture, or you may need to rephrase. '
-                                  'Try asking about network statistics, threats, or general patterns.')
-                # Return success status with helpful message instead of error
                 return {
-                    'status': 'success',
-                    'response': fallback_message,
-                    'mode': 'option2',
-                    'retrieved_chunks': None
+                    'status': 'error',
+                    'message': 'I couldn\'t find relevant information to answer your specific question. The query might be too specific or use terms not present in the traffic data. Try asking about general statistics, threats, or rephrasing your question.'
                 }
 
             with open(summary_file, 'r') as f:
@@ -807,13 +775,9 @@ Just ask your question naturally, and I'll search through the network traffic an
 
         except Exception as e:
             print(f"Error in fallback handler: {str(e)}")
-            fallback_message = ('I encountered an issue while searching for information. '
-                              'Try asking about network statistics, threats, or rephrasing your question.')
             return {
-                'status': 'success',
-                'response': fallback_message,
-                'mode': 'option2',
-                'retrieved_chunks': None
+                'status': 'error',
+                'message': 'I couldn\'t find specific information to answer your question. Try asking about overall threats, statistics, or rephrasing your query.'
             }
 
     def _is_short_followup(self, query: str) -> bool:
@@ -1061,92 +1025,3 @@ User's current request: Continue with more details about {last_user_query}"""
 
 User's current follow-up question: {query}"""
             return enriched
-
-    def _extract_and_store_entities(self, analysis_id: str, query: str, response: str):
-        """Extract IP addresses, MACs, hostnames from response and store in memory."""
-        import re
-
-        if analysis_id not in self.option2_entity_memory:
-            self.option2_entity_memory[analysis_id] = {
-                'infected_ips': set(),
-                'infected_hosts': {},  # Maps descriptors to IPs
-                'mac_addresses': {},  # Maps IPs to MACs
-                'hostnames': {},  # Maps IPs to hostnames
-                'domains': set(),
-                'last_mentioned_ip': None
-            }
-
-        memory = self.option2_entity_memory[analysis_id]
-
-        # Extract IP addresses (IPv4)
-        ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
-        ips_found = re.findall(ip_pattern, response)
-
-        # Extract MAC addresses
-        mac_pattern = r'\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'
-        macs_found = re.findall(mac_pattern, response)
-
-        # Check if response mentions infected/compromised hosts
-        response_lower = response.lower()
-        query_lower = query.lower()
-
-        if any(term in response_lower or term in query_lower for term in ['infected', 'compromised', 'victim', 'malicious']):
-            # Store IPs mentioned in infection context
-            for ip in ips_found:
-                memory['infected_ips'].add(ip)
-                memory['last_mentioned_ip'] = ip
-
-                # Store descriptors
-                if any(term in response_lower for term in ['windows client', 'windows host', 'client']):
-                    memory['infected_hosts']['infected_windows_client'] = ip
-                    memory['infected_hosts']['infected_client'] = ip
-                    memory['infected_hosts']['victim'] = ip
-                    memory['infected_hosts']['compromised_host'] = ip
-                    print(f"[Entity Memory] Stored infected Windows client: {ip}")
-
-        # Map MACs to IPs (if both found together in response)
-        if ips_found and macs_found:
-            # Simple heuristic: if one IP and one MAC, they're likely related
-            if len(ips_found) == 1 and len(macs_found) == 1:
-                memory['mac_addresses'][ips_found[0]] = macs_found[0]
-                print(f"[Entity Memory] Mapped {ips_found[0]} -> {macs_found[0]}")
-
-    def _resolve_entity_references(self, query: str, analysis_id: str, chat_history: List[Dict]) -> str:
-        """Resolve entity references like 'infected Windows client' to specific IPs."""
-        if analysis_id not in self.option2_entity_memory:
-            return query
-
-        memory = self.option2_entity_memory[analysis_id]
-        query_lower = query.lower()
-
-        # Check for reference patterns
-        reference_patterns = [
-            ('infected windows client', 'infected_windows_client'),
-            ('infected client', 'infected_client'),
-            ('victim', 'victim'),
-            ('compromised host', 'compromised_host'),
-            ('that host', 'last_mentioned_ip'),
-            ('this host', 'last_mentioned_ip'),
-            ('that ip', 'last_mentioned_ip'),
-            ('this ip', 'last_mentioned_ip'),
-            ('the host', 'last_mentioned_ip'),
-            ('the client', 'infected_client')
-        ]
-
-        resolved_ip = None
-        for pattern, key in reference_patterns:
-            if pattern in query_lower:
-                if key in memory['infected_hosts']:
-                    resolved_ip = memory['infected_hosts'][key]
-                    break
-                elif key == 'last_mentioned_ip' and memory['last_mentioned_ip']:
-                    resolved_ip = memory['last_mentioned_ip']
-                    break
-
-        if resolved_ip:
-            # Inject the resolved IP into the query
-            resolved_query = f"{query} (referring to IP {resolved_ip})"
-            print(f"[Entity Resolution] Resolved reference to: {resolved_ip}")
-            return resolved_query
-
-        return query
