@@ -12,6 +12,225 @@ class PCAPParser:
         self.capture = None
         self.packets_data = []
 
+        # Sensitive file path patterns for InfoStealer detection
+        self.sensitive_file_patterns = {
+            'browser_passwords': [
+                'Login Data', 'logins.json', 'signons.sqlite', 'key4.db', 'key3.db'
+            ],
+            'browser_cookies': [
+                'Cookies', 'cookies.sqlite', 'cookies.txt'
+            ],
+            'browser_autofill': [
+                'Web Data', 'formhistory.sqlite', 'autofill'
+            ],
+            'browser_history': [
+                'History', 'places.sqlite', 'WebCacheV01.dat'
+            ],
+            'browser_bookmarks': [
+                'Bookmarks', 'bookmarks.html', 'favicons.sqlite'
+            ],
+            'crypto_wallets': [
+                'wallet.dat', 'Exodus', 'Electrum', 'Ethereum', 'exodus.wallet',
+                'Atomic', 'Coinomi', 'Jaxx', 'Metamask', 'Binance', 'Ledger'
+            ],
+            'system_credentials': [
+                'SAM', 'SYSTEM', 'SECURITY', 'NTDS.dit', 'NTUSER.DAT'
+            ],
+            'vpn_credentials': [
+                'NordVPN', 'ProtonVPN', 'ExpressVPN', 'vpn.conf'
+            ],
+            'ftp_credentials': [
+                'FileZilla', 'sitemanager.xml', 'recentservers.xml'
+            ],
+            'email_data': [
+                'Outlook', 'Thunderbird', '.pst', '.ost', 'Mail'
+            ],
+            'messaging_apps': [
+                'Telegram', 'Discord', 'Skype', 'Signal', 'WhatsApp'
+            ],
+            'gaming_accounts': [
+                'Steam', 'Battle.net', 'Epic Games', 'Origin', 'Uplay'
+            ],
+            'documents': [
+                '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt'
+            ]
+        }
+
+    def _categorize_file_path(self, file_path: str) -> Dict[str, Any]:
+        """Categorize a file path to identify sensitive data types."""
+        if not file_path:
+            return {'category': 'unknown', 'is_sensitive': False}
+
+        file_path_lower = file_path.lower()
+
+        # Check against all sensitive patterns
+        for category, patterns in self.sensitive_file_patterns.items():
+            for pattern in patterns:
+                if pattern.lower() in file_path_lower:
+                    return {
+                        'category': category,
+                        'is_sensitive': True,
+                        'pattern_matched': pattern,
+                        'file_path': file_path
+                    }
+
+        # Not sensitive
+        return {'category': 'other', 'is_sensitive': False}
+
+    def _analyze_c2_patterns(self, all_packets: List[Dict], forensic_trackers: Dict) -> Dict[str, Any]:
+        """Detect C2 (Command & Control) communication patterns."""
+        c2_analysis = {
+            'beaconing_detected': False,
+            'beacon_interval': None,
+            'c2_servers': [],
+            'connection_pattern': 'unknown',
+            'dns_tunneling': False
+        }
+
+        # Analyze connection timing patterns for beaconing
+        connection_times = {}  # dst_ip -> [timestamps]
+
+        for packet in all_packets:
+            dst_ip = packet.get('ip', {}).get('dst')
+            timestamp = packet.get('timestamp')
+
+            if dst_ip and timestamp:
+                # Skip internal IPs
+                if not (dst_ip.startswith('10.') or dst_ip.startswith('192.168.') or dst_ip.startswith('172.')):
+                    if dst_ip not in connection_times:
+                        connection_times[dst_ip] = []
+                    connection_times[dst_ip].append(timestamp)
+
+        # Detect periodic beaconing (connections at regular intervals)
+        from datetime import datetime
+        for dst_ip, timestamps in connection_times.items():
+            if len(timestamps) >= 5:  # At least 5 connections
+                try:
+                    # Parse timestamps and calculate intervals
+                    dt_timestamps = []
+                    for ts in timestamps[:20]:  # Check first 20
+                        try:
+                            if isinstance(ts, str):
+                                dt = datetime.fromisoformat(ts.replace('UTC', '').strip())
+                                dt_timestamps.append(dt)
+                        except:
+                            continue
+
+                    if len(dt_timestamps) >= 5:
+                        intervals = []
+                        for i in range(1, len(dt_timestamps)):
+                            delta = (dt_timestamps[i] - dt_timestamps[i-1]).total_seconds()
+                            intervals.append(delta)
+
+                        # Check if intervals are consistent (periodic)
+                        if len(intervals) >= 4:
+                            avg_interval = sum(intervals) / len(intervals)
+                            # Check if variance is low (periodic behavior)
+                            variance = sum((x - avg_interval) ** 2 for x in intervals) / len(intervals)
+                            std_dev = variance ** 0.5
+
+                            # Beaconing detected if standard deviation is < 20% of average
+                            if avg_interval > 5 and std_dev < (avg_interval * 0.2):
+                                c2_analysis['beaconing_detected'] = True
+                                c2_analysis['beacon_interval'] = f"{int(avg_interval)} seconds"
+                                c2_analysis['c2_servers'].append(dst_ip)
+                                c2_analysis['connection_pattern'] = 'periodic_beaconing'
+                except:
+                    pass
+
+        return c2_analysis
+
+    def _classify_attack_pattern(self, forensic_trackers: Dict, forensic_analysis: Dict) -> Dict[str, Any]:
+        """Classify the attack pattern based on behavioral indicators."""
+        classification = {
+            'attack_type': 'Unknown',
+            'confidence': 0.0,
+            'indicators': [],
+            'stolen_data_types': [],
+            'targeted_applications': []
+        }
+
+        # Count different types of indicators
+        sensitive_files = forensic_trackers.get('sensitive_file_access', [])
+        http_uploads = forensic_trackers.get('http_uploads', [])
+
+        # Categorize sensitive files accessed
+        file_categories = {}
+        for file_access in sensitive_files:
+            category = file_access.get('category', 'unknown')
+            if category not in file_categories:
+                file_categories[category] = 0
+            file_categories[category] += 1
+
+        # InfoStealer scoring
+        infostealer_score = 0
+        if 'browser_passwords' in file_categories:
+            infostealer_score += 30
+            classification['indicators'].append('Browser password theft')
+            classification['stolen_data_types'].append('browser_passwords')
+        if 'browser_cookies' in file_categories:
+            infostealer_score += 25
+            classification['indicators'].append('Browser cookie theft')
+            classification['stolen_data_types'].append('browser_cookies')
+        if 'crypto_wallets' in file_categories:
+            infostealer_score += 35
+            classification['indicators'].append('Cryptocurrency wallet theft')
+            classification['stolen_data_types'].append('crypto_wallets')
+        if 'browser_autofill' in file_categories:
+            infostealer_score += 20
+            classification['stolen_data_types'].append('browser_autofill')
+        if len(http_uploads) > 0:
+            infostealer_score += 15
+            classification['indicators'].append('Data exfiltration via HTTP')
+
+        # Detect targeted applications
+        for file_access in sensitive_files:
+            file_path = file_access.get('file_path', '')
+            if 'chrome' in file_path.lower():
+                if 'Chrome' not in classification['targeted_applications']:
+                    classification['targeted_applications'].append('Chrome')
+            elif 'firefox' in file_path.lower():
+                if 'Firefox' not in classification['targeted_applications']:
+                    classification['targeted_applications'].append('Firefox')
+            elif 'edge' in file_path.lower():
+                if 'Edge' not in classification['targeted_applications']:
+                    classification['targeted_applications'].append('Edge')
+            elif 'exodus' in file_path.lower():
+                if 'Exodus Wallet' not in classification['targeted_applications']:
+                    classification['targeted_applications'].append('Exodus Wallet')
+            elif 'electrum' in file_path.lower():
+                if 'Electrum Wallet' not in classification['targeted_applications']:
+                    classification['targeted_applications'].append('Electrum Wallet')
+
+        # Ransomware scoring (lower priority for now)
+        ransomware_score = 0
+        if 'system_credentials' in file_categories:
+            ransomware_score += 20
+
+        # Banking Trojan scoring
+        banking_score = 0
+        if 'browser_cookies' in file_categories and len(http_uploads) > 3:
+            banking_score += 30
+
+        # Determine final classification
+        max_score = max(infostealer_score, ransomware_score, banking_score)
+
+        if max_score >= 30:
+            if infostealer_score == max_score:
+                classification['attack_type'] = 'InfoStealer'
+                classification['confidence'] = min(infostealer_score / 100.0, 0.95)
+            elif ransomware_score == max_score:
+                classification['attack_type'] = 'Ransomware'
+                classification['confidence'] = min(ransomware_score / 100.0, 0.95)
+            elif banking_score == max_score:
+                classification['attack_type'] = 'Banking Trojan'
+                classification['confidence'] = min(banking_score / 100.0, 0.95)
+        else:
+            classification['attack_type'] = 'Generic Malware'
+            classification['confidence'] = 0.5
+
+        return classification
+
     def compute_file_hash(self) -> str:
         sha256_hash = hashlib.sha256()
         with open(self.file_path, "rb") as f:
@@ -826,7 +1045,17 @@ class PCAPParser:
             'kerberos_users': {},  # user -> details
             'smb_sessions': {},  # ip -> smb details
             'mac_to_ip': {},  # mac -> [ips]
-            'host_profiles': {}  # ip -> complete profile
+            'host_profiles': {},  # ip -> complete profile
+            # Behavioral IOC tracking
+            'http_uploads': [],  # Large POST/PUT requests (potential exfiltration)
+            'smb_file_access': [],  # SMB file reads/writes
+            'sensitive_file_access': [],  # Browser profiles, wallets, credentials
+            'c2_connections': [],  # Suspected C2 communication
+            'exfiltration_summary': {
+                'total_bytes_uploaded': 0,
+                'upload_count': 0,
+                'destinations': set()
+            }
         }
 
         try:
@@ -919,19 +1148,87 @@ class PCAPParser:
 
                 if hasattr(packet, 'http'):
                     packet_data['http'] = {}
-                    if hasattr(packet.http, 'host'):
-                        packet_data['http']['host'] = packet.http.host
-                        stats['unique_domains'].add(packet.http.host)
-                    if hasattr(packet.http, 'request_method'):
-                        packet_data['http']['method'] = packet.http.request_method
-                    if hasattr(packet.http, 'request_uri'):
-                        packet_data['http']['uri'] = packet.http.request_uri
-                    if hasattr(packet.http, 'response_code'):
-                        packet_data['http']['status_code'] = packet.http.response_code
-                    if hasattr(packet.http, 'user_agent'):
-                        packet_data['http']['user_agent'] = packet.http.user_agent
-                    if hasattr(packet.http, 'content_type'):
-                        packet_data['http']['content_type'] = packet.http.content_type
+                    http = packet.http
+
+                    # Basic HTTP fields
+                    if hasattr(http, 'host'):
+                        packet_data['http']['host'] = http.host
+                        stats['unique_domains'].add(http.host)
+                    if hasattr(http, 'request_method'):
+                        packet_data['http']['method'] = http.request_method
+                    if hasattr(http, 'request_uri'):
+                        packet_data['http']['uri'] = http.request_uri
+
+                        # Parse URL parameters for sensitive data
+                        if '?' in http.request_uri:
+                            uri_parts = http.request_uri.split('?', 1)
+                            packet_data['http']['query_string'] = uri_parts[1] if len(uri_parts) > 1 else None
+
+                    if hasattr(http, 'response_code'):
+                        packet_data['http']['status_code'] = http.response_code
+                    if hasattr(http, 'user_agent'):
+                        packet_data['http']['user_agent'] = http.user_agent
+                    if hasattr(http, 'content_type'):
+                        packet_data['http']['content_type'] = http.content_type
+                    if hasattr(http, 'content_length'):
+                        packet_data['http']['content_length'] = http.content_length
+
+                    # Extract HTTP body/payload (request and response)
+                    if hasattr(http, 'file_data'):
+                        file_data = http.file_data
+                        # Store first 2KB of body (for analysis, not full storage)
+                        packet_data['http']['body_preview'] = file_data[:2000] if len(file_data) > 2000 else file_data
+                        packet_data['http']['body_size'] = len(file_data)
+
+                        # Detect sensitive data patterns in body
+                        body_lower = file_data.lower()
+                        sensitive_keywords = ['password', 'username', 'email', 'token', 'credential',
+                                             'key', 'secret', 'auth', 'session', 'login', 'wallet']
+                        packet_data['http']['contains_sensitive_data'] = any(kw in body_lower for kw in sensitive_keywords)
+
+                    # Extract cookies (request)
+                    if hasattr(http, 'cookie'):
+                        packet_data['http']['cookies'] = http.cookie
+
+                    # Extract Set-Cookie (response)
+                    if hasattr(http, 'set_cookie'):
+                        packet_data['http']['set_cookies'] = http.set_cookie
+
+                    # Extract authorization headers
+                    if hasattr(http, 'authorization'):
+                        packet_data['http']['authorization'] = http.authorization
+
+                    # Extract referer
+                    if hasattr(http, 'referer'):
+                        packet_data['http']['referer'] = http.referer
+
+                    # Extract other security-relevant headers
+                    if hasattr(http, 'x_requested_with'):
+                        packet_data['http']['x_requested_with'] = http.x_requested_with
+
+                    # Detect data exfiltration patterns
+                    if hasattr(http, 'request_method') and http.request_method in ['POST', 'PUT']:
+                        content_length = int(http.content_length) if hasattr(http, 'content_length') else 0
+                        if content_length > 10000:  # >10KB upload
+                            packet_data['http']['suspected_exfiltration'] = True
+                            packet_data['http']['upload_size'] = content_length
+
+                            # Track for behavioral analysis
+                            src_ip = packet_data.get('ip', {}).get('src')
+                            dst_ip = packet_data.get('ip', {}).get('dst')
+                            if src_ip and dst_ip:
+                                forensic_trackers['http_uploads'].append({
+                                    'timestamp': packet_data['timestamp'],
+                                    'src_ip': src_ip,
+                                    'dst_ip': dst_ip,
+                                    'size': content_length,
+                                    'url': f"{http.host if hasattr(http, 'host') else ''}{http.request_uri if hasattr(http, 'request_uri') else ''}",
+                                    'content_type': http.content_type if hasattr(http, 'content_type') else None,
+                                    'method': http.request_method
+                                })
+                                forensic_trackers['exfiltration_summary']['total_bytes_uploaded'] += content_length
+                                forensic_trackers['exfiltration_summary']['upload_count'] += 1
+                                forensic_trackers['exfiltration_summary']['destinations'].add(f"{dst_ip}")
 
                 if hasattr(packet, 'tls'):
                     packet_data['tls'] = {}
@@ -1141,6 +1438,24 @@ class PCAPParser:
                         packet_data['smb']['file_name'] = smb.file_name
                     elif hasattr(smb, 'filename'):
                         packet_data['smb']['file_name'] = smb.filename
+
+                    # Categorize and track sensitive file access
+                    file_name = packet_data['smb'].get('file_name')
+                    if file_name:
+                        file_category = self._categorize_file_path(file_name)
+                        packet_data['smb']['file_category'] = file_category['category']
+                        packet_data['smb']['is_sensitive'] = file_category['is_sensitive']
+
+                        # Track sensitive file access for behavioral analysis
+                        if file_category['is_sensitive']:
+                            forensic_trackers['sensitive_file_access'].append({
+                                'timestamp': packet_data['timestamp'],
+                                'src_ip': packet_data.get('ip', {}).get('src'),
+                                'file_path': file_name,
+                                'category': file_category['category'],
+                                'pattern_matched': file_category.get('pattern_matched'),
+                                'protocol': 'SMB'
+                            })
 
                     # Track SMB sessions
                     src_ip = packet_data.get('ip', {}).get('src')
@@ -1516,6 +1831,38 @@ class PCAPParser:
 
         # Sort final timeline
         forensic_analysis['infection_timeline'].sort(key=lambda x: x['timestamp'] if x['timestamp'] else '')
+
+        # Add behavioral IOC analysis
+        print(f"[PCAP Parser] Analyzing attack patterns and C2 communication...")
+
+        # Analyze C2 patterns
+        c2_analysis = self._analyze_c2_patterns(all_packets, forensic_trackers)
+
+        # Classify attack pattern
+        attack_classification = self._classify_attack_pattern(forensic_trackers, forensic_analysis)
+
+        # Build behavioral IOCs section
+        forensic_analysis['behavioral_iocs'] = {
+            'attack_type': attack_classification['attack_type'],
+            'confidence': attack_classification['confidence'],
+            'indicators': attack_classification['indicators'],
+            'stolen_data_types': attack_classification['stolen_data_types'],
+            'targeted_applications': attack_classification['targeted_applications'],
+            'files_accessed': forensic_trackers.get('sensitive_file_access', []),
+            'exfiltration_summary': {
+                'total_bytes_uploaded': forensic_trackers['exfiltration_summary']['total_bytes_uploaded'],
+                'upload_count': forensic_trackers['exfiltration_summary']['upload_count'],
+                'destinations': list(forensic_trackers['exfiltration_summary']['destinations']),
+                'uploads': forensic_trackers.get('http_uploads', [])
+            },
+            'c2_communication': c2_analysis
+        }
+
+        print(f"[PCAP Parser] Attack classified as: {attack_classification['attack_type']} (confidence: {attack_classification['confidence']*100:.0f}%)")
+        if attack_classification['stolen_data_types']:
+            print(f"[PCAP Parser] Stolen data types detected: {', '.join(attack_classification['stolen_data_types'])}")
+        if forensic_trackers['exfiltration_summary']['upload_count'] > 0:
+            print(f"[PCAP Parser] Data exfiltration detected: {forensic_trackers['exfiltration_summary']['upload_count']} uploads, {forensic_trackers['exfiltration_summary']['total_bytes_uploaded']} bytes total")
 
         return forensic_analysis
 

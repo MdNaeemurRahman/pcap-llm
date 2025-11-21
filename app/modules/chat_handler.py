@@ -685,6 +685,31 @@ Just ask your question naturally, and I'll search through the network traffic an
         if 'infection' in query_lower and 'start' in query_lower:
             expansions.append('infection start infection time attack start initial compromise first malicious activity timeline')
 
+        # Behavioral analysis keyword expansions (NEW)
+        if 'steal' in query_lower or 'stolen' in query_lower or 'theft' in query_lower:
+            expansions.append('steal stolen theft exfiltration data uploaded POST information sensitive credentials passwords cookies wallets browser')
+
+        if 'credential' in query_lower or 'password' in query_lower or 'login' in query_lower:
+            expansions.append('credentials passwords login authentication saved passwords browser passwords Login Data logins.json')
+
+        if 'browser' in query_lower:
+            expansions.append('browser Chrome Firefox Edge cookies login data web data history bookmarks autofill')
+
+        if 'wallet' in query_lower or 'crypto' in query_lower or 'bitcoin' in query_lower:
+            expansions.append('crypto wallet cryptocurrency bitcoin ethereum exodus electrum atomic wallet.dat')
+
+        if 'exfiltration' in query_lower or 'exfiltrate' in query_lower or 'upload' in query_lower:
+            expansions.append('exfiltration upload POST PUT data transfer HTTP C2 command control stolen data sent uploaded')
+
+        if 'file' in query_lower and ('access' in query_lower or 'read' in query_lower):
+            expansions.append('file access SMB file read accessed opened sensitive files malware files targeted')
+
+        if 'attack' in query_lower or 'malware' in query_lower:
+            expansions.append('attack malware InfoStealer trojan Banking Trojan ransomware malicious behavior')
+
+        if 'c2' in query_lower or 'command' in query_lower or 'control' in query_lower:
+            expansions.append('C2 command control beaconing periodic communication malware communication')
+
         # Existing expansions
         if 'file_analysis' in classification['topics']:
             expansions.append('file transfer download upload HTTP')

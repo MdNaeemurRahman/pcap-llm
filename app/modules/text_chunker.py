@@ -521,15 +521,96 @@ class TextChunker:
             if topo.get('external_ips'):
                 text_parts.append(f"External IPs Contacted: {len(topo['external_ips'])} unique addresses")
 
-        text_parts.append("")
+        # Add behavioral IOCs section
+        if forensic_data.get('behavioral_iocs'):
+            iocs = forensic_data['behavioral_iocs']
+
+            text_parts.append("=== ATTACK BEHAVIOR ANALYSIS ===")
+            text_parts.append(f"Attack Type: {iocs.get('attack_type', 'Unknown')}")
+            text_parts.append(f"Confidence Level: {iocs.get('confidence', 0)*100:.0f}%")
+            text_parts.append(f"Malware Classification: {iocs.get('attack_type', 'Unknown')}")
+            text_parts.append("")
+
+            if iocs.get('indicators'):
+                text_parts.append("MALICIOUS BEHAVIOR INDICATORS:")
+                for indicator in iocs['indicators']:
+                    text_parts.append(f"  - {indicator}")
+                text_parts.append("")
+
+            if iocs.get('stolen_data_types'):
+                text_parts.append("STOLEN DATA TYPES:")
+                text_parts.append("The attacker attempted to steal the following types of sensitive information:")
+                for data_type in iocs['stolen_data_types']:
+                    formatted_type = data_type.replace('_', ' ').title()
+                    text_parts.append(f"  - {formatted_type}")
+                    # Add semantic keywords for RAG retrieval
+                    if data_type == 'browser_passwords':
+                        text_parts.append(f"    (Login credentials, saved passwords, authentication data)")
+                    elif data_type == 'browser_cookies':
+                        text_parts.append(f"    (Session tokens, authentication cookies, web cookies)")
+                    elif data_type == 'crypto_wallets':
+                        text_parts.append(f"    (Cryptocurrency wallets, Bitcoin, Ethereum, crypto assets)")
+                    elif data_type == 'browser_autofill':
+                        text_parts.append(f"    (Saved credit cards, payment info, form data)")
+                text_parts.append("")
+
+            if iocs.get('targeted_applications'):
+                text_parts.append("TARGETED APPLICATIONS:")
+                text_parts.append(f"The malware specifically targeted: {', '.join(iocs['targeted_applications'])}")
+                text_parts.append("")
+
+            if iocs.get('files_accessed'):
+                files = iocs['files_accessed']
+                if len(files) > 0:
+                    text_parts.append("FILES ACCESSED BY MALWARE:")
+                    text_parts.append(f"The malware accessed {len(files)} sensitive files:")
+                    for file in files[:20]:  # Show first 20
+                        category = file.get('category', 'unknown').replace('_', ' ').title()
+                        text_parts.append(f"  [{category}] {file.get('file_path', 'unknown')}")
+                    if len(files) > 20:
+                        text_parts.append(f"  ... and {len(files) - 20} more files")
+                    text_parts.append("")
+
+            if iocs.get('exfiltration_summary'):
+                exfil = iocs['exfiltration_summary']
+                if exfil.get('upload_count', 0) > 0:
+                    text_parts.append("DATA EXFILTRATION DETECTED:")
+                    text_parts.append(f"  Total Data Uploaded: {exfil['total_bytes_uploaded']} bytes")
+                    text_parts.append(f"  Number of Uploads: {exfil['upload_count']}")
+                    text_parts.append(f"  Exfiltration Method: HTTP POST/PUT requests")
+                    if exfil.get('destinations'):
+                        text_parts.append(f"  C2 Servers: {', '.join(exfil['destinations'][:5])}")
+                    text_parts.append("")
+
+                    # Add semantic descriptions
+                    text_parts.append("The attacker exfiltrated stolen data from the victim machine.")
+                    text_parts.append("Sensitive information was uploaded to attacker-controlled servers.")
+                    text_parts.append("Data theft and information stealing was successful.")
+                    text_parts.append("")
+
+            if iocs.get('c2_communication', {}).get('beaconing_detected'):
+                c2 = iocs['c2_communication']
+                text_parts.append("C2 COMMUNICATION PATTERNS:")
+                text_parts.append(f"  Beaconing Detected: YES")
+                text_parts.append(f"  Beacon Interval: {c2.get('beacon_interval', 'unknown')}")
+                text_parts.append(f"  Connection Pattern: {c2.get('connection_pattern', 'unknown')}")
+                if c2.get('c2_servers'):
+                    text_parts.append(f"  C2 Servers: {', '.join(c2['c2_servers'][:5])}")
+                text_parts.append("")
+                text_parts.append("The malware maintained persistent communication with command and control servers.")
+                text_parts.append("Regular beaconing indicates active remote control capabilities.")
+                text_parts.append("")
+
         text_parts.append("NOTE: This forensic metadata was extracted from multiple protocol layers including:")
         text_parts.append("- Layer 2 (Ethernet/MAC addresses)")
         text_parts.append("- DHCP (hostname, domain name)")
         text_parts.append("- NetBIOS/NBNS (computer name, workgroup)")
         text_parts.append("- Kerberos (user authentication, realm)")
         text_parts.append("- SMB/SMB2 (OS version, domain, file access)")
+        text_parts.append("- HTTP (POST data, cookies, headers, body analysis)")
         text_parts.append("- ARP (MAC to IP mappings)")
         text_parts.append("- Combined with VirusTotal threat intelligence")
+        text_parts.append("- Behavioral pattern analysis and attack classification")
 
         return {
             'chunk_index': chunk_index,
