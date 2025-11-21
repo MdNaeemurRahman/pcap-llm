@@ -839,6 +839,9 @@ class PCAPParser:
         if not infected_host:
             return forensic_profile
 
+        # Normalize VT results to expected format
+        vt_results = self._normalize_vt_results(vt_results)
+
         # Build list of malicious IPs and domains from VT results
         malicious_ips = []
         malicious_domains = []
@@ -1377,8 +1380,72 @@ class PCAPParser:
 
         return full_data
 
+    def _normalize_vt_results(self, vt_results: Any) -> Dict[str, Any]:
+        """Normalize VT results to consistent dict format with 'results' key.
+
+        Handles both list format from batch_query_entities() and dict format.
+        Returns: {results: {ip: {addr: {...}}, domain: {name: {...}}, file: {hash: {...}}}}
+        """
+        if isinstance(vt_results, dict) and 'results' in vt_results:
+            # Already in correct format
+            return vt_results
+
+        if isinstance(vt_results, list):
+            # Convert list format to nested dict format
+            normalized = {
+                'results': {
+                    'ip': {},
+                    'domain': {},
+                    'file': {}
+                }
+            }
+
+            for item in vt_results:
+                if not isinstance(item, dict):
+                    continue
+
+                entity_type = item.get('entity_type')
+                entity_value = item.get('entity_value')
+
+                if not entity_type or not entity_value:
+                    continue
+
+                # Map list format to dict format
+                entity_data = {
+                    'malicious': item.get('malicious_count', 0),
+                    'suspicious': item.get('suspicious_count', 0),
+                    'harmless': item.get('harmless_count', 0),
+                    'undetected': item.get('undetected_count', 0),
+                    'threat_label': item.get('threat_label', 'Unknown'),
+                    'categories': []
+                }
+
+                # Add type-specific data
+                if entity_type == 'domain' and item.get('category'):
+                    entity_data['categories'] = list(item['category'].values()) if isinstance(item['category'], dict) else []
+
+                if entity_type == 'file':
+                    entity_data['detection_engines'] = item.get('detection_engines', [])
+                    entity_data['threat_category'] = item.get('threat_category', [])
+                    entity_data['sandbox_verdicts'] = item.get('sandbox_verdicts', [])
+
+                # Add to normalized structure
+                if entity_type in normalized['results']:
+                    normalized['results'][entity_type][entity_value] = entity_data
+
+            print(f"[PCAP Parser] Normalized VT results: {len(normalized['results']['ip'])} IPs, {len(normalized['results']['domain'])} domains, {len(normalized['results']['file'])} files")
+            return normalized
+
+        # Return empty structure if invalid format
+        return {'results': {'ip': {}, 'domain': {}, 'file': {}}}
+
     def _aggregate_forensic_metadata(self, all_packets: List[Dict], forensic_trackers: Dict, stats: Dict, vt_results: Any = None) -> Dict[str, Any]:
         """Aggregate forensic metadata from all collected tracking data."""
+        # Normalize VT results to expected format
+        if vt_results:
+            vt_results = self._normalize_vt_results(vt_results)
+            print(f"[PCAP Parser] VT results normalized for forensic analysis")
+
         forensic_analysis = {
             'hosts': {},
             'arp_table': {},

@@ -23,6 +23,7 @@ class ChatHandler:
         self.tshark_agent = TSharkAgent(ollama_client)
         self.option3_agents = {}
         self.option1_session_memory = {}
+        self.option2_entity_memory = {}  # Track entities mentioned in Option 2 conversations
 
     def handle_option1_query(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
@@ -167,7 +168,10 @@ class ChatHandler:
                 for msg in chat_history[-5:]
             ]
 
-            enriched_query = self._enrich_query_with_context(query, formatted_history)
+            # Resolve entity references from conversation memory
+            resolved_query = self._resolve_entity_references(query, analysis_id, formatted_history)
+
+            enriched_query = self._enrich_query_with_context(resolved_query, formatted_history)
             expanded_query = self._expand_query(enriched_query, query_classification)
             print(f"Performing similarity search with query: '{expanded_query}'")
             search_results = self.vector_store.similarity_search(
@@ -211,6 +215,9 @@ class ChatHandler:
                 }
                 for chunk in filtered_chunks
             ]
+
+            # Extract and store entities from the response for future reference resolution
+            self._extract_and_store_entities(analysis_id, query, response)
 
             self.supabase.insert_chat_message(
                 analysis_id=analysis_id,
@@ -1054,3 +1061,92 @@ User's current request: Continue with more details about {last_user_query}"""
 
 User's current follow-up question: {query}"""
             return enriched
+
+    def _extract_and_store_entities(self, analysis_id: str, query: str, response: str):
+        """Extract IP addresses, MACs, hostnames from response and store in memory."""
+        import re
+
+        if analysis_id not in self.option2_entity_memory:
+            self.option2_entity_memory[analysis_id] = {
+                'infected_ips': set(),
+                'infected_hosts': {},  # Maps descriptors to IPs
+                'mac_addresses': {},  # Maps IPs to MACs
+                'hostnames': {},  # Maps IPs to hostnames
+                'domains': set(),
+                'last_mentioned_ip': None
+            }
+
+        memory = self.option2_entity_memory[analysis_id]
+
+        # Extract IP addresses (IPv4)
+        ip_pattern = r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b'
+        ips_found = re.findall(ip_pattern, response)
+
+        # Extract MAC addresses
+        mac_pattern = r'\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'
+        macs_found = re.findall(mac_pattern, response)
+
+        # Check if response mentions infected/compromised hosts
+        response_lower = response.lower()
+        query_lower = query.lower()
+
+        if any(term in response_lower or term in query_lower for term in ['infected', 'compromised', 'victim', 'malicious']):
+            # Store IPs mentioned in infection context
+            for ip in ips_found:
+                memory['infected_ips'].add(ip)
+                memory['last_mentioned_ip'] = ip
+
+                # Store descriptors
+                if any(term in response_lower for term in ['windows client', 'windows host', 'client']):
+                    memory['infected_hosts']['infected_windows_client'] = ip
+                    memory['infected_hosts']['infected_client'] = ip
+                    memory['infected_hosts']['victim'] = ip
+                    memory['infected_hosts']['compromised_host'] = ip
+                    print(f"[Entity Memory] Stored infected Windows client: {ip}")
+
+        # Map MACs to IPs (if both found together in response)
+        if ips_found and macs_found:
+            # Simple heuristic: if one IP and one MAC, they're likely related
+            if len(ips_found) == 1 and len(macs_found) == 1:
+                memory['mac_addresses'][ips_found[0]] = macs_found[0]
+                print(f"[Entity Memory] Mapped {ips_found[0]} -> {macs_found[0]}")
+
+    def _resolve_entity_references(self, query: str, analysis_id: str, chat_history: List[Dict]) -> str:
+        """Resolve entity references like 'infected Windows client' to specific IPs."""
+        if analysis_id not in self.option2_entity_memory:
+            return query
+
+        memory = self.option2_entity_memory[analysis_id]
+        query_lower = query.lower()
+
+        # Check for reference patterns
+        reference_patterns = [
+            ('infected windows client', 'infected_windows_client'),
+            ('infected client', 'infected_client'),
+            ('victim', 'victim'),
+            ('compromised host', 'compromised_host'),
+            ('that host', 'last_mentioned_ip'),
+            ('this host', 'last_mentioned_ip'),
+            ('that ip', 'last_mentioned_ip'),
+            ('this ip', 'last_mentioned_ip'),
+            ('the host', 'last_mentioned_ip'),
+            ('the client', 'infected_client')
+        ]
+
+        resolved_ip = None
+        for pattern, key in reference_patterns:
+            if pattern in query_lower:
+                if key in memory['infected_hosts']:
+                    resolved_ip = memory['infected_hosts'][key]
+                    break
+                elif key == 'last_mentioned_ip' and memory['last_mentioned_ip']:
+                    resolved_ip = memory['last_mentioned_ip']
+                    break
+
+        if resolved_ip:
+            # Inject the resolved IP into the query
+            resolved_query = f"{query} (referring to IP {resolved_ip})"
+            print(f"[Entity Resolution] Resolved reference to: {resolved_ip}")
+            return resolved_query
+
+        return query
