@@ -440,6 +440,19 @@ class ChatHandler:
         """Format concise, security-focused summary for malware analysis."""
         context_parts = []
 
+        # PRIORITY: Forensic Host Identification (if available)
+        if summary_data.get('forensic_profile') and summary_data['forensic_profile'].get('infected_host'):
+            host = summary_data['forensic_profile']['infected_host']
+            context_parts.append("=== INFECTED HOST IDENTIFICATION ===")
+            context_parts.append(f"IP Address: {host.get('ip', 'N/A')}")
+            context_parts.append(f"MAC Address: {host.get('mac', 'N/A')}")
+            context_parts.append(f"Hostname: {host.get('hostname', 'N/A')}")
+            context_parts.append(f"User Account: {host.get('user_account', 'N/A')}")
+            context_parts.append(f"Domain: {host.get('domain', 'N/A')}")
+            context_parts.append(f"OS Version: {host.get('os_version', 'N/A')}")
+            context_parts.append(f"First Activity: {host.get('first_seen', 'N/A')}")
+            context_parts.append("")
+
         context_parts.append("=== PCAP SUMMARY ===")
         context_parts.append(f"File: {summary_data['file_info']['filename']}")
         context_parts.append(f"Packets: {summary_data['statistics']['total_packets']} | IPs: {summary_data['statistics']['unique_ips_count']} | Domains: {summary_data['statistics']['unique_domains_count']}")
@@ -650,6 +663,29 @@ Just ask your question naturally, and I'll search through the network traffic an
 
         expansions = []
 
+        # Forensic keyword expansions (NEW - for Layer 2-7 data)
+        if 'mac address' in query_lower or 'hardware address' in query_lower or 'physical address' in query_lower:
+            expansions.append('MAC address hardware address physical address Ethernet address layer2 address ARP ether')
+
+        if 'hostname' in query_lower or 'computer name' in query_lower or 'machine name' in query_lower:
+            expansions.append('hostname computer name machine name workstation name NetBIOS name DHCP hostname device name')
+
+        if 'user account' in query_lower or 'username' in query_lower or 'user' in query_lower:
+            expansions.append('user account username user principal UPN account name Kerberos SMB authenticated user logged in user')
+
+        if 'domain' in query_lower and 'subdomain' not in query_lower:
+            expansions.append('domain realm Kerberos realm Active Directory AD domain Windows domain DNS domain workgroup LDAP')
+
+        if 'os' in query_lower or 'operating system' in query_lower or 'windows' in query_lower:
+            expansions.append('operating system OS Windows version build number native OS SMB platform system')
+
+        if 'infected' in query_lower or 'compromised' in query_lower or 'victim' in query_lower:
+            expansions.append('infected compromised victim malicious activity threat detected attack target patient zero')
+
+        if 'infection' in query_lower and 'start' in query_lower:
+            expansions.append('infection start infection time attack start initial compromise first malicious activity timeline')
+
+        # Existing expansions
         if 'file_analysis' in classification['topics']:
             expansions.append('file transfer download upload HTTP')
 

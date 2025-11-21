@@ -471,7 +471,17 @@ class PCAPParser:
             'tcp_connections': [],
             'connection_tracker': {},
             'file_transfers': [],
-            'top_flows': {}
+            'top_flows': {},
+            'forensic_profile': None  # Will be populated at the end
+        }
+
+        # Lean forensic tracking for Option 1 (only essentials)
+        forensic_data = {
+            'first_host_seen': {},  # ip -> {mac, hostname, timestamp}
+            'first_user_seen': None,  # First user account found
+            'first_domain_seen': None,  # First domain found
+            'os_version_seen': None,  # First OS version found
+            'infected_ips': set()  # Will be populated with VT data later
         }
 
         try:
@@ -638,6 +648,94 @@ class PCAPParser:
                     if 'query_name' in query:
                         data['dns_queries'].append(query)
 
+                # Lean forensic extraction (Option 1) - only store first occurrence
+                # Extract ARP for MAC address (only if not already captured)
+                if hasattr(packet, 'arp'):
+                    if hasattr(packet.arp, 'src_proto_ipv4') and hasattr(packet.arp, 'src_hw_mac'):
+                        arp_ip = packet.arp.src_proto_ipv4
+                        if arp_ip not in forensic_data['first_host_seen']:
+                            forensic_data['first_host_seen'][arp_ip] = {
+                                'mac': packet.arp.src_hw_mac,
+                                'hostname': None,
+                                'timestamp': timestamp
+                            }
+
+                # Extract DHCP for hostname (only first occurrence)
+                if hasattr(packet, 'dhcp') or hasattr(packet, 'bootp'):
+                    if hasattr(packet, 'bootp'):
+                        dhcp_ip = packet.bootp.ip_your if hasattr(packet.bootp, 'ip_your') else None
+                        dhcp_mac = packet.bootp.hw_mac_addr if hasattr(packet.bootp, 'hw_mac_addr') else None
+
+                        if dhcp_ip and dhcp_ip != '0.0.0.0':
+                            if dhcp_ip not in forensic_data['first_host_seen']:
+                                forensic_data['first_host_seen'][dhcp_ip] = {
+                                    'mac': dhcp_mac,
+                                    'hostname': None,
+                                    'timestamp': timestamp
+                                }
+
+                    if hasattr(packet, 'dhcp'):
+                        # Extract hostname from DHCP Option 12
+                        if hasattr(packet.dhcp, 'option_hostname') and dhcp_ip:
+                            if dhcp_ip in forensic_data['first_host_seen']:
+                                forensic_data['first_host_seen'][dhcp_ip]['hostname'] = packet.dhcp.option_hostname
+
+                        # Extract domain from DHCP Option 15
+                        if hasattr(packet.dhcp, 'option_domain_name') and not forensic_data['first_domain_seen']:
+                            forensic_data['first_domain_seen'] = packet.dhcp.option_domain_name
+
+                        # Extract OS fingerprint from DHCP Option 60 (Vendor Class)
+                        if hasattr(packet.dhcp, 'option_vendor_class_id') and not forensic_data['os_version_seen']:
+                            forensic_data['os_version_seen'] = packet.dhcp.option_vendor_class_id
+
+                # Extract NetBIOS for hostname (only first occurrence)
+                if hasattr(packet, 'nbns'):
+                    if hasattr(packet.nbns, 'name') and src_ip:
+                        if src_ip in forensic_data['first_host_seen']:
+                            if not forensic_data['first_host_seen'][src_ip]['hostname']:
+                                # Clean NetBIOS name (remove suffix like <00>)
+                                nb_name = packet.nbns.name.split('<')[0] if '<' in packet.nbns.name else packet.nbns.name
+                                forensic_data['first_host_seen'][src_ip]['hostname'] = nb_name
+                        elif src_ip:
+                            nb_name = packet.nbns.name.split('<')[0] if '<' in packet.nbns.name else packet.nbns.name
+                            forensic_data['first_host_seen'][src_ip] = {
+                                'mac': None,
+                                'hostname': nb_name,
+                                'timestamp': timestamp
+                            }
+
+                # Extract Kerberos for user account (only first occurrence)
+                if hasattr(packet, 'kerberos') and not forensic_data['first_user_seen']:
+                    if hasattr(packet.kerberos, 'cname_string'):
+                        user = packet.kerberos.cname_string
+                        realm = packet.kerberos.realm if hasattr(packet.kerberos, 'realm') else None
+                        forensic_data['first_user_seen'] = f"{user}@{realm}" if realm else user
+                    elif hasattr(packet.kerberos, 'cnamestring'):
+                        user = packet.kerberos.cnamestring
+                        realm = packet.kerberos.realm if hasattr(packet.kerberos, 'realm') else None
+                        forensic_data['first_user_seen'] = f"{user}@{realm}" if realm else user
+
+                    # Also capture realm as domain if not set
+                    if hasattr(packet.kerberos, 'realm') and not forensic_data['first_domain_seen']:
+                        forensic_data['first_domain_seen'] = packet.kerberos.realm
+
+                # Extract SMB for OS version and domain (only first occurrence)
+                if hasattr(packet, 'smb') or hasattr(packet, 'smb2'):
+                    smb = packet.smb if hasattr(packet, 'smb') else packet.smb2
+
+                    if hasattr(smb, 'native_os') and not forensic_data['os_version_seen']:
+                        forensic_data['os_version_seen'] = smb.native_os
+
+                    if hasattr(smb, 'domain') and not forensic_data['first_domain_seen']:
+                        forensic_data['first_domain_seen'] = smb.domain
+
+                    # Extract user from SMB if not found yet
+                    if not forensic_data['first_user_seen']:
+                        if hasattr(smb, 'account'):
+                            forensic_data['first_user_seen'] = smb.account
+                        elif hasattr(smb, 'user_name'):
+                            forensic_data['first_user_seen'] = smb.user_name
+
         except Exception as e:
             print(f"[PCAP Parser] Warning during single-pass extraction: {str(e)}")
         finally:
@@ -658,11 +756,57 @@ class PCAPParser:
         data['tcp_connections'] = list(data['connection_tracker'].values())
         data['tcp_connections'].sort(key=lambda x: x['first_seen'])
 
+        # Build lean forensic profile for Option 1
+        def is_internal_ip(ip: str) -> bool:
+            if ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('172.'):
+                octets = ip.split('.')
+                if ip.startswith('172.') and len(octets) == 4:
+                    try:
+                        second_octet = int(octets[1])
+                        return 16 <= second_octet <= 31
+                    except:
+                        return False
+                return True
+            return False
+
+        # Find the most likely infected host (internal IP with most traffic or first one found)
+        internal_hosts = {ip: info for ip, info in forensic_data['first_host_seen'].items() if is_internal_ip(ip)}
+
+        if internal_hosts:
+            # Pick the first internal host with complete info, or just the first one
+            infected_host_ip = None
+            for ip, info in internal_hosts.items():
+                if info.get('hostname') or info.get('mac'):
+                    infected_host_ip = ip
+                    break
+
+            if not infected_host_ip:
+                infected_host_ip = list(internal_hosts.keys())[0]
+
+            host_info = internal_hosts[infected_host_ip]
+
+            data['forensic_profile'] = {
+                'infected_host': {
+                    'ip': infected_host_ip,
+                    'mac': host_info.get('mac', 'N/A'),
+                    'hostname': host_info.get('hostname', 'N/A'),
+                    'user_account': forensic_data.get('first_user_seen', 'N/A'),
+                    'domain': forensic_data.get('first_domain_seen', 'N/A'),
+                    'os_version': forensic_data.get('os_version_seen', 'N/A'),
+                    'first_seen': host_info.get('timestamp', 'N/A')
+                }
+            }
+
+            print(f"[PCAP Parser] Forensic profile created for infected host: {infected_host_ip}")
+        else:
+            print(f"[PCAP Parser] No internal hosts found for forensic profile")
+            data['forensic_profile'] = None
+
         print(f"[PCAP Parser] Single-pass complete: {data['total_packets']} packets, {len(data['unique_ips'])} IPs, {len(data['unique_domains'])} domains")
 
         return data
 
-    def generate_full_json(self, output_path: str) -> Dict[str, Any]:
+    def generate_full_json(self, output_path: str, vt_results: Any = None) -> Dict[str, Any]:
         if not self.capture:
             self.load_capture()
 
@@ -672,6 +816,17 @@ class PCAPParser:
             'unique_domains': set(),
             'protocols': Counter(),
             'file_hashes': set()
+        }
+
+        # Forensic tracking for aggregation
+        forensic_trackers = {
+            'arp_table': {},  # ip -> mac mapping
+            'dhcp_info': {},  # ip -> dhcp details
+            'netbios_names': {},  # ip -> netbios names
+            'kerberos_users': {},  # user -> details
+            'smb_sessions': {},  # ip -> smb details
+            'mac_to_ip': {},  # mac -> [ips]
+            'host_profiles': {}  # ip -> complete profile
         }
 
         try:
@@ -694,6 +849,19 @@ class PCAPParser:
                     packet_data['layers'].append(layer.layer_name)
 
                 stats['protocols'][packet_data['protocol']] += 1
+
+                # Extract Ethernet/MAC layer (Layer 2)
+                if hasattr(packet, 'eth'):
+                    packet_data['ethernet'] = {
+                        'src_mac': packet.eth.src if hasattr(packet.eth, 'src') else None,
+                        'dst_mac': packet.eth.dst if hasattr(packet.eth, 'dst') else None,
+                        'type': packet.eth.type if hasattr(packet.eth, 'type') else None
+                    }
+                    # Track MAC addresses
+                    if packet_data['ethernet']['src_mac']:
+                        src_mac = packet_data['ethernet']['src_mac']
+                        if src_mac not in forensic_trackers['mac_to_ip']:
+                            forensic_trackers['mac_to_ip'][src_mac] = []
 
                 if hasattr(packet, 'ip'):
                     packet_data['ip'] = {
@@ -783,6 +951,243 @@ class PCAPParser:
                     except:
                         pass
 
+                # Extract ARP packets
+                if hasattr(packet, 'arp'):
+                    packet_data['arp'] = {
+                        'opcode': packet.arp.opcode if hasattr(packet.arp, 'opcode') else None,
+                        'src_ip': packet.arp.src_proto_ipv4 if hasattr(packet.arp, 'src_proto_ipv4') else None,
+                        'src_mac': packet.arp.src_hw_mac if hasattr(packet.arp, 'src_hw_mac') else None,
+                        'dst_ip': packet.arp.dst_proto_ipv4 if hasattr(packet.arp, 'dst_proto_ipv4') else None,
+                        'dst_mac': packet.arp.dst_hw_mac if hasattr(packet.arp, 'dst_hw_mac') else None
+                    }
+                    # Build ARP table
+                    if packet_data['arp']['src_ip'] and packet_data['arp']['src_mac']:
+                        forensic_trackers['arp_table'][packet_data['arp']['src_ip']] = {
+                            'mac': packet_data['arp']['src_mac'],
+                            'last_seen': packet_data['timestamp']
+                        }
+                    if packet_data['arp']['dst_ip'] and packet_data['arp']['dst_mac']:
+                        if packet_data['arp']['dst_mac'] != '00:00:00:00:00:00':
+                            forensic_trackers['arp_table'][packet_data['arp']['dst_ip']] = {
+                                'mac': packet_data['arp']['dst_mac'],
+                                'last_seen': packet_data['timestamp']
+                            }
+
+                # Extract DHCP/BOOTP packets
+                if hasattr(packet, 'dhcp') or hasattr(packet, 'bootp'):
+                    packet_data['dhcp'] = {}
+
+                    if hasattr(packet, 'bootp'):
+                        bootp = packet.bootp
+                        packet_data['dhcp']['message_type'] = bootp.option_dhcp if hasattr(bootp, 'option_dhcp') else None
+                        packet_data['dhcp']['client_ip'] = bootp.ip_client if hasattr(bootp, 'ip_client') else None
+                        packet_data['dhcp']['your_ip'] = bootp.ip_your if hasattr(bootp, 'ip_your') else None
+                        packet_data['dhcp']['server_ip'] = bootp.ip_server if hasattr(bootp, 'ip_server') else None
+                        packet_data['dhcp']['client_mac'] = bootp.hw_mac_addr if hasattr(bootp, 'hw_mac_addr') else None
+
+                    if hasattr(packet, 'dhcp'):
+                        dhcp = packet.dhcp
+                        # Extract DHCP options
+                        packet_data['dhcp']['options'] = {}
+
+                        # Option 12: Hostname
+                        if hasattr(dhcp, 'option_hostname'):
+                            packet_data['dhcp']['options']['hostname'] = dhcp.option_hostname
+
+                        # Option 15: Domain Name
+                        if hasattr(dhcp, 'option_domain_name'):
+                            packet_data['dhcp']['options']['domain_name'] = dhcp.option_domain_name
+
+                        # Option 50: Requested IP
+                        if hasattr(dhcp, 'option_requested_ip_address'):
+                            packet_data['dhcp']['options']['requested_ip'] = dhcp.option_requested_ip_address
+
+                        # Option 60: Vendor Class ID
+                        if hasattr(dhcp, 'option_vendor_class_id'):
+                            packet_data['dhcp']['options']['vendor_class_id'] = dhcp.option_vendor_class_id
+
+                        # Option 61: Client Identifier
+                        if hasattr(dhcp, 'option_client_identifier'):
+                            packet_data['dhcp']['options']['client_identifier'] = dhcp.option_client_identifier
+
+                        # Option 81: FQDN
+                        if hasattr(dhcp, 'option_fqdn'):
+                            packet_data['dhcp']['options']['fqdn'] = dhcp.option_fqdn
+
+                    # Track DHCP info for forensics
+                    your_ip = packet_data['dhcp'].get('your_ip')
+                    if your_ip and your_ip != '0.0.0.0':
+                        if your_ip not in forensic_trackers['dhcp_info']:
+                            forensic_trackers['dhcp_info'][your_ip] = {
+                                'mac': packet_data['dhcp'].get('client_mac'),
+                                'hostname': packet_data['dhcp'].get('options', {}).get('hostname'),
+                                'domain': packet_data['dhcp'].get('options', {}).get('domain_name'),
+                                'vendor': packet_data['dhcp'].get('options', {}).get('vendor_class_id'),
+                                'timestamp': packet_data['timestamp']
+                            }
+
+                # Extract NetBIOS/NBNS packets
+                if hasattr(packet, 'nbns'):
+                    packet_data['netbios'] = {
+                        'name': packet.nbns.name if hasattr(packet.nbns, 'name') else None,
+                        'name_type': packet.nbns.type if hasattr(packet.nbns, 'type') else None,
+                        'query_type': packet.nbns.query_type if hasattr(packet.nbns, 'query_type') else None
+                    }
+                    # Track NetBIOS names
+                    src_ip = packet_data.get('ip', {}).get('src')
+                    if src_ip and packet_data['netbios']['name']:
+                        if src_ip not in forensic_trackers['netbios_names']:
+                            forensic_trackers['netbios_names'][src_ip] = []
+                        name_entry = {
+                            'name': packet_data['netbios']['name'],
+                            'type': packet_data['netbios']['name_type'],
+                            'timestamp': packet_data['timestamp']
+                        }
+                        forensic_trackers['netbios_names'][src_ip].append(name_entry)
+
+                # Extract NetBIOS Datagram Service
+                if hasattr(packet, 'nbdgm'):
+                    if not packet_data.get('netbios'):
+                        packet_data['netbios'] = {}
+                    packet_data['netbios']['source_name'] = packet.nbdgm.source_name if hasattr(packet.nbdgm, 'source_name') else None
+
+                # Extract Kerberos packets
+                if hasattr(packet, 'kerberos'):
+                    packet_data['kerberos'] = {}
+                    kerb = packet.kerberos
+
+                    # Message type
+                    if hasattr(kerb, 'msg_type'):
+                        packet_data['kerberos']['message_type'] = kerb.msg_type
+
+                    # Client name (username)
+                    if hasattr(kerb, 'cname_string'):
+                        packet_data['kerberos']['client_name'] = kerb.cname_string
+                    elif hasattr(kerb, 'cnamestring'):
+                        packet_data['kerberos']['client_name'] = kerb.cnamestring
+
+                    # Realm (domain)
+                    if hasattr(kerb, 'realm'):
+                        packet_data['kerberos']['realm'] = kerb.realm
+
+                    # Service name
+                    if hasattr(kerb, 'sname_string'):
+                        packet_data['kerberos']['service_name'] = kerb.sname_string
+                    elif hasattr(kerb, 'snamestring'):
+                        packet_data['kerberos']['service_name'] = kerb.snamestring
+
+                    # Encryption type
+                    if hasattr(kerb, 'etype'):
+                        packet_data['kerberos']['encryption_type'] = kerb.etype
+
+                    # Error code
+                    if hasattr(kerb, 'error_code'):
+                        packet_data['kerberos']['error_code'] = kerb.error_code
+
+                    # Track Kerberos users
+                    client_name = packet_data['kerberos'].get('client_name')
+                    realm = packet_data['kerberos'].get('realm')
+                    if client_name:
+                        full_user = f"{client_name}@{realm}" if realm else client_name
+                        if full_user not in forensic_trackers['kerberos_users']:
+                            forensic_trackers['kerberos_users'][full_user] = {
+                                'realm': realm,
+                                'services': [],
+                                'first_seen': packet_data['timestamp'],
+                                'source_ip': packet_data.get('ip', {}).get('src')
+                            }
+                        service = packet_data['kerberos'].get('service_name')
+                        if service and service not in forensic_trackers['kerberos_users'][full_user]['services']:
+                            forensic_trackers['kerberos_users'][full_user]['services'].append(service)
+                        forensic_trackers['kerberos_users'][full_user]['last_seen'] = packet_data['timestamp']
+
+                # Extract SMB/SMB2 packets
+                if hasattr(packet, 'smb') or hasattr(packet, 'smb2'):
+                    packet_data['smb'] = {}
+                    smb = packet.smb if hasattr(packet, 'smb') else packet.smb2
+
+                    # Command
+                    if hasattr(smb, 'cmd'):
+                        packet_data['smb']['command'] = smb.cmd
+
+                    # Dialect
+                    if hasattr(smb, 'dialect'):
+                        packet_data['smb']['dialect'] = smb.dialect
+
+                    # Native OS
+                    if hasattr(smb, 'native_os'):
+                        packet_data['smb']['native_os'] = smb.native_os
+
+                    # Native LAN Manager
+                    if hasattr(smb, 'native_lan_manager'):
+                        packet_data['smb']['native_lan_manager'] = smb.native_lan_manager
+
+                    # Domain/Workgroup
+                    if hasattr(smb, 'domain'):
+                        packet_data['smb']['domain'] = smb.domain
+
+                    # User name
+                    if hasattr(smb, 'account'):
+                        packet_data['smb']['user_name'] = smb.account
+                    elif hasattr(smb, 'user_name'):
+                        packet_data['smb']['user_name'] = smb.user_name
+
+                    # Tree path (share name)
+                    if hasattr(smb, 'path'):
+                        packet_data['smb']['tree_path'] = smb.path
+
+                    # File name
+                    if hasattr(smb, 'file_name'):
+                        packet_data['smb']['file_name'] = smb.file_name
+                    elif hasattr(smb, 'filename'):
+                        packet_data['smb']['file_name'] = smb.filename
+
+                    # Track SMB sessions
+                    src_ip = packet_data.get('ip', {}).get('src')
+                    if src_ip:
+                        if src_ip not in forensic_trackers['smb_sessions']:
+                            forensic_trackers['smb_sessions'][src_ip] = {
+                                'native_os': None,
+                                'domain': None,
+                                'users': [],
+                                'shares': [],
+                                'files': []
+                            }
+
+                        if packet_data['smb'].get('native_os'):
+                            forensic_trackers['smb_sessions'][src_ip]['native_os'] = packet_data['smb']['native_os']
+                        if packet_data['smb'].get('domain'):
+                            forensic_trackers['smb_sessions'][src_ip]['domain'] = packet_data['smb']['domain']
+                        if packet_data['smb'].get('user_name'):
+                            user = packet_data['smb']['user_name']
+                            if user not in forensic_trackers['smb_sessions'][src_ip]['users']:
+                                forensic_trackers['smb_sessions'][src_ip]['users'].append(user)
+                        if packet_data['smb'].get('tree_path'):
+                            share = packet_data['smb']['tree_path']
+                            if share not in forensic_trackers['smb_sessions'][src_ip]['shares']:
+                                forensic_trackers['smb_sessions'][src_ip]['shares'].append(share)
+                        if packet_data['smb'].get('file_name'):
+                            file = packet_data['smb']['file_name']
+                            if file not in forensic_trackers['smb_sessions'][src_ip]['files']:
+                                forensic_trackers['smb_sessions'][src_ip]['files'].append(file)
+
+                # Extract LDAP packets
+                if hasattr(packet, 'ldap'):
+                    packet_data['ldap'] = {}
+                    ldap = packet.ldap
+
+                    # Bind request (authentication)
+                    if hasattr(ldap, 'bindrequest_name'):
+                        packet_data['ldap']['bind_dn'] = ldap.bindrequest_name
+
+                    # Search base
+                    if hasattr(ldap, 'search_baseobject'):
+                        packet_data['ldap']['search_base'] = ldap.search_baseobject
+
+                    # Search filter
+                    if hasattr(ldap, 'search_filter'):
+                        packet_data['ldap']['search_filter'] = ldap.search_filter
+
                 all_packets.append(packet_data)
         except Exception as e:
             print(f"Warning during full parsing: {str(e)}")
@@ -793,6 +1198,14 @@ class PCAPParser:
         file_hash = self.compute_file_hash()
         print(f"[PCAP Parser] Completed processing {len(all_packets)} packets")
         print(f"[PCAP Parser] PCAP file hash: {file_hash}")
+
+        # Aggregate forensic metadata
+        print(f"[PCAP Parser] Aggregating forensic metadata...")
+        forensic_analysis = self._aggregate_forensic_metadata(all_packets, forensic_trackers, stats, vt_results)
+        print(f"[PCAP Parser] Found {len(forensic_analysis['hosts'])} hosts with forensic data")
+        infected_hosts = [ip for ip, host in forensic_analysis['hosts'].items() if host['is_infected']]
+        if infected_hosts:
+            print(f"[PCAP Parser] Identified {len(infected_hosts)} potentially infected hosts: {infected_hosts}")
 
         full_data = {
             'file_info': {
@@ -811,6 +1224,7 @@ class PCAPParser:
                 'ips': list(stats['unique_ips']),
                 'domains': list(stats['unique_domains'])
             },
+            'forensic_analysis': forensic_analysis,
             'packets': all_packets
         }
 
@@ -822,6 +1236,288 @@ class PCAPParser:
             json.dump(full_data, f, indent=2)
 
         return full_data
+
+    def _aggregate_forensic_metadata(self, all_packets: List[Dict], forensic_trackers: Dict, stats: Dict, vt_results: Any = None) -> Dict[str, Any]:
+        """Aggregate forensic metadata from all collected tracking data."""
+        forensic_analysis = {
+            'hosts': {},
+            'arp_table': {},
+            'mac_vendor_lookup': {},
+            'network_topology': {
+                'internal_ips': [],
+                'external_ips': [],
+                'gateway': None,
+                'dns_servers': []
+            },
+            'infection_timeline': []
+        }
+
+        # If forensic_trackers is empty, rebuild from packets
+        if not forensic_trackers or len(forensic_trackers) == 0:
+            forensic_trackers = {
+                'arp_table': {},
+                'dhcp_info': {},
+                'netbios_names': {},
+                'kerberos_users': {},
+                'smb_sessions': {},
+                'mac_to_ip': {},
+                'host_profiles': {}
+            }
+
+            # Rebuild forensic trackers from packets
+            for packet in all_packets:
+                timestamp = packet.get('timestamp', '')
+
+                # Extract ARP data
+                if 'arp' in packet:
+                    arp = packet['arp']
+                    if arp.get('src_ip') and arp.get('src_mac'):
+                        forensic_trackers['arp_table'][arp['src_ip']] = {
+                            'mac': arp['src_mac'],
+                            'last_seen': timestamp
+                        }
+
+                # Extract DHCP data
+                if 'dhcp' in packet:
+                    dhcp = packet['dhcp']
+                    your_ip = dhcp.get('your_ip')
+                    if your_ip and your_ip != '0.0.0.0':
+                        forensic_trackers['dhcp_info'][your_ip] = {
+                            'mac': dhcp.get('client_mac'),
+                            'hostname': dhcp.get('options', {}).get('hostname'),
+                            'domain': dhcp.get('options', {}).get('domain_name'),
+                            'vendor': dhcp.get('options', {}).get('vendor_class_id'),
+                            'timestamp': timestamp
+                        }
+
+                # Extract NetBIOS data
+                if 'netbios' in packet:
+                    nb = packet['netbios']
+                    src_ip = packet.get('ip', {}).get('src')
+                    if src_ip and nb.get('name'):
+                        if src_ip not in forensic_trackers['netbios_names']:
+                            forensic_trackers['netbios_names'][src_ip] = []
+                        forensic_trackers['netbios_names'][src_ip].append({
+                            'name': nb['name'],
+                            'type': nb.get('name_type'),
+                            'timestamp': timestamp
+                        })
+
+                # Extract Kerberos data
+                if 'kerberos' in packet:
+                    kerb = packet['kerberos']
+                    client_name = kerb.get('client_name')
+                    realm = kerb.get('realm')
+                    if client_name:
+                        full_user = f"{client_name}@{realm}" if realm else client_name
+                        if full_user not in forensic_trackers['kerberos_users']:
+                            forensic_trackers['kerberos_users'][full_user] = {
+                                'realm': realm,
+                                'services': [],
+                                'first_seen': timestamp,
+                                'source_ip': packet.get('ip', {}).get('src')
+                            }
+                        service = kerb.get('service_name')
+                        if service and service not in forensic_trackers['kerberos_users'][full_user]['services']:
+                            forensic_trackers['kerberos_users'][full_user]['services'].append(service)
+                        forensic_trackers['kerberos_users'][full_user]['last_seen'] = timestamp
+
+                # Extract SMB data
+                if 'smb' in packet:
+                    smb = packet['smb']
+                    src_ip = packet.get('ip', {}).get('src')
+                    if src_ip:
+                        if src_ip not in forensic_trackers['smb_sessions']:
+                            forensic_trackers['smb_sessions'][src_ip] = {
+                                'native_os': None,
+                                'domain': None,
+                                'users': [],
+                                'shares': [],
+                                'files': []
+                            }
+                        if smb.get('native_os'):
+                            forensic_trackers['smb_sessions'][src_ip]['native_os'] = smb['native_os']
+                        if smb.get('domain'):
+                            forensic_trackers['smb_sessions'][src_ip]['domain'] = smb['domain']
+                        if smb.get('user_name') and smb['user_name'] not in forensic_trackers['smb_sessions'][src_ip]['users']:
+                            forensic_trackers['smb_sessions'][src_ip]['users'].append(smb['user_name'])
+
+        # Build ARP table
+        for ip, arp_data in forensic_trackers['arp_table'].items():
+            forensic_analysis['arp_table'][ip] = arp_data['mac']
+
+        # Identify internal IPs (RFC1918)
+        def is_internal_ip(ip: str) -> bool:
+            if ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('172.'):
+                octets = ip.split('.')
+                if ip.startswith('172.') and len(octets) == 4:
+                    second_octet = int(octets[1])
+                    return 16 <= second_octet <= 31
+                return True
+            return False
+
+        # Build host profiles
+        for ip in stats['unique_ips']:
+            if is_internal_ip(ip):
+                forensic_analysis['network_topology']['internal_ips'].append(ip)
+            else:
+                forensic_analysis['network_topology']['external_ips'].append(ip)
+
+            host_profile = {
+                'mac_addresses': [],
+                'hostnames': [],
+                'netbios_names': [],
+                'user_accounts': [],
+                'domains': [],
+                'os_versions': [],
+                'first_seen': None,
+                'last_seen': None,
+                'total_packets': 0,
+                'is_infected': False,
+                'malicious_connections': []
+            }
+
+            # Get MAC address from ARP
+            if ip in forensic_trackers['arp_table']:
+                mac = forensic_trackers['arp_table'][ip]['mac']
+                if mac not in host_profile['mac_addresses']:
+                    host_profile['mac_addresses'].append(mac)
+
+            # Get DHCP info
+            if ip in forensic_trackers['dhcp_info']:
+                dhcp_info = forensic_trackers['dhcp_info'][ip]
+                if dhcp_info.get('hostname') and dhcp_info['hostname'] not in host_profile['hostnames']:
+                    host_profile['hostnames'].append(dhcp_info['hostname'])
+                if dhcp_info.get('domain') and dhcp_info['domain'] not in host_profile['domains']:
+                    host_profile['domains'].append(dhcp_info['domain'])
+                if dhcp_info.get('vendor') and dhcp_info['vendor'] not in host_profile['os_versions']:
+                    host_profile['os_versions'].append(dhcp_info['vendor'])
+                if dhcp_info.get('mac') and dhcp_info['mac'] not in host_profile['mac_addresses']:
+                    host_profile['mac_addresses'].append(dhcp_info['mac'])
+
+            # Get NetBIOS names
+            if ip in forensic_trackers['netbios_names']:
+                for name_entry in forensic_trackers['netbios_names'][ip]:
+                    name = name_entry['name']
+                    if name and name not in host_profile['netbios_names']:
+                        host_profile['netbios_names'].append(name)
+                    # NetBIOS name without suffix can be hostname
+                    clean_name = name.split('<')[0] if '<' in name else name
+                    if clean_name and clean_name not in host_profile['hostnames']:
+                        host_profile['hostnames'].append(clean_name)
+
+            # Get SMB info
+            if ip in forensic_trackers['smb_sessions']:
+                smb_info = forensic_trackers['smb_sessions'][ip]
+                if smb_info.get('native_os') and smb_info['native_os'] not in host_profile['os_versions']:
+                    host_profile['os_versions'].append(smb_info['native_os'])
+                if smb_info.get('domain') and smb_info['domain'] not in host_profile['domains']:
+                    host_profile['domains'].append(smb_info['domain'])
+                for user in smb_info.get('users', []):
+                    if user and user not in host_profile['user_accounts']:
+                        host_profile['user_accounts'].append(user)
+
+            # Get Kerberos users associated with this IP
+            for user, kerb_info in forensic_trackers['kerberos_users'].items():
+                if kerb_info.get('source_ip') == ip:
+                    if user not in host_profile['user_accounts']:
+                        host_profile['user_accounts'].append(user)
+                    if kerb_info.get('realm') and kerb_info['realm'] not in host_profile['domains']:
+                        host_profile['domains'].append(kerb_info['realm'])
+
+            # Calculate timestamps and packet count
+            timestamps = []
+            packet_count = 0
+            for packet in all_packets:
+                src_ip = packet.get('ip', {}).get('src') or packet.get('ipv6', {}).get('src')
+                dst_ip = packet.get('ip', {}).get('dst') or packet.get('ipv6', {}).get('dst')
+                if src_ip == ip or dst_ip == ip:
+                    packet_count += 1
+                    if packet.get('timestamp'):
+                        timestamps.append(packet['timestamp'])
+
+            if timestamps:
+                host_profile['first_seen'] = min(timestamps)
+                host_profile['last_seen'] = max(timestamps)
+            host_profile['total_packets'] = packet_count
+
+            # Check if infected (has connections to malicious IPs/domains from VT)
+            if vt_results and isinstance(vt_results, dict) and 'results' in vt_results:
+                malicious_ips = []
+                malicious_domains = []
+
+                # Get malicious IPs from VT results
+                if 'ip' in vt_results['results']:
+                    for vt_ip, vt_data in vt_results['results']['ip'].items():
+                        if vt_data.get('malicious', 0) > 0:
+                            malicious_ips.append(vt_ip)
+
+                # Get malicious domains from VT results
+                if 'domain' in vt_results['results']:
+                    for vt_domain, vt_data in vt_results['results']['domain'].items():
+                        if vt_data.get('malicious', 0) > 0:
+                            malicious_domains.append(vt_domain)
+
+                # Check if this host connected to any malicious entities
+                for packet in all_packets:
+                    src_ip = packet.get('ip', {}).get('src')
+                    dst_ip = packet.get('ip', {}).get('dst')
+
+                    # If this is an internal host connecting to external malicious IP
+                    if src_ip == ip and dst_ip in malicious_ips:
+                        host_profile['is_infected'] = True
+                        if dst_ip not in host_profile['malicious_connections']:
+                            host_profile['malicious_connections'].append({
+                                'type': 'ip',
+                                'value': dst_ip,
+                                'timestamp': packet.get('timestamp')
+                            })
+
+                    # Check DNS queries to malicious domains
+                    if src_ip == ip and packet.get('dns', {}).get('query_name') in malicious_domains:
+                        host_profile['is_infected'] = True
+                        domain = packet['dns']['query_name']
+                        if domain not in [c['value'] for c in host_profile['malicious_connections']]:
+                            host_profile['malicious_connections'].append({
+                                'type': 'domain',
+                                'value': domain,
+                                'timestamp': packet.get('timestamp')
+                            })
+
+            # Only add hosts with meaningful data
+            if (host_profile['mac_addresses'] or host_profile['hostnames'] or
+                host_profile['user_accounts'] or host_profile['total_packets'] > 10):
+                forensic_analysis['hosts'][ip] = host_profile
+
+        # Build infection timeline for infected hosts
+        for ip, host in forensic_analysis['hosts'].items():
+            if host['is_infected']:
+                timeline_events = []
+
+                # Add host identification events
+                if host['first_seen']:
+                    timeline_events.append({
+                        'timestamp': host['first_seen'],
+                        'description': f"Host {ip} first activity - " +
+                                     (f"Hostname: {host['hostnames'][0]}" if host['hostnames'] else "Unknown host")
+                    })
+
+                # Add malicious connection events
+                for conn in host['malicious_connections'][:10]:  # Limit to first 10
+                    timeline_events.append({
+                        'timestamp': conn['timestamp'],
+                        'description': f"Malicious {conn['type']} connection: {conn['value']}"
+                    })
+
+                # Sort by timestamp
+                timeline_events.sort(key=lambda x: x['timestamp'] if x['timestamp'] else '')
+
+                forensic_analysis['infection_timeline'].extend(timeline_events)
+
+        # Sort final timeline
+        forensic_analysis['infection_timeline'].sort(key=lambda x: x['timestamp'] if x['timestamp'] else '')
+
+        return forensic_analysis
 
     def get_unique_entities(self) -> Tuple[List[str], List[str]]:
         stats = self.extract_basic_stats()

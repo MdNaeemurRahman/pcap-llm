@@ -62,6 +62,15 @@ class TextChunker:
         chunks = []
         chunk_index = 0
 
+        # Create forensic metadata chunk FIRST (Chunk 0) for priority retrieval
+        if full_json_data.get('forensic_analysis'):
+            forensic_chunk = self._create_forensic_metadata_chunk(
+                full_json_data['forensic_analysis'],
+                chunk_index
+            )
+            chunks.append(forensic_chunk)
+            chunk_index += 1
+
         normalized_vt_results = self._normalize_vt_results(vt_results) if vt_results else {}
         vt_lookup = self._build_vt_lookup(normalized_vt_results) if normalized_vt_results else {}
 
@@ -388,6 +397,160 @@ class TextChunker:
         text_parts.append("confirmed threats detected in the analyzed network traffic.")
 
         return "\n".join(text_parts)
+
+    def _create_forensic_metadata_chunk(self, forensic_data: Dict[str, Any], chunk_index: int) -> Dict[str, Any]:
+        """Create a priority chunk with forensic investigation data for easy RAG retrieval."""
+        text_parts = []
+
+        text_parts.append("=== FORENSIC INVESTIGATION METADATA ===")
+        text_parts.append("This chunk contains critical host identification and infection timeline data extracted from network traffic analysis.")
+        text_parts.append("")
+
+        # Find infected hosts
+        infected_hosts = {ip: host for ip, host in forensic_data.get('hosts', {}).items() if host.get('is_infected')}
+
+        if infected_hosts:
+            for ip, host_info in infected_hosts.items():
+                text_parts.append("=== INFECTED HOST IDENTIFIED ===")
+                text_parts.append(f"IP Address: {ip}")
+
+                if host_info.get('mac_addresses'):
+                    mac = host_info['mac_addresses'][0]
+                    text_parts.append(f"MAC Address: {mac}")
+                    text_parts.append(f"Hardware Address: {mac}")
+                    text_parts.append(f"Physical Address: {mac}")
+                    text_parts.append(f"Ethernet Address: {mac}")
+
+                if host_info.get('hostnames'):
+                    hostname = host_info['hostnames'][0]
+                    text_parts.append(f"Hostname: {hostname}")
+                    text_parts.append(f"Computer Name: {hostname}")
+                    text_parts.append(f"Machine Name: {hostname}")
+                    text_parts.append(f"Workstation Name: {hostname}")
+                    if len(host_info['hostnames']) > 1:
+                        text_parts.append(f"All observed hostnames: {', '.join(host_info['hostnames'])}")
+
+                if host_info.get('netbios_names'):
+                    text_parts.append(f"NetBIOS Names: {', '.join(host_info['netbios_names'])}")
+
+                if host_info.get('user_accounts'):
+                    user = host_info['user_accounts'][0]
+                    text_parts.append(f"User Account: {user}")
+                    text_parts.append(f"Username: {user}")
+                    text_parts.append(f"Authenticated User: {user}")
+                    text_parts.append(f"Logged in User: {user}")
+                    text_parts.append(f"Account Name: {user}")
+                    if len(host_info['user_accounts']) > 1:
+                        text_parts.append(f"All observed users: {', '.join(host_info['user_accounts'])}")
+
+                if host_info.get('domains'):
+                    domain = host_info['domains'][0]
+                    text_parts.append(f"Domain: {domain}")
+                    text_parts.append(f"Windows Domain: {domain}")
+                    text_parts.append(f"Active Directory Domain: {domain}")
+                    text_parts.append(f"Realm: {domain}")
+                    text_parts.append(f"Workgroup: {domain}")
+
+                if host_info.get('os_versions'):
+                    os_version = host_info['os_versions'][0]
+                    text_parts.append(f"Operating System: {os_version}")
+                    text_parts.append(f"OS Version: {os_version}")
+                    text_parts.append(f"Windows Version: {os_version}")
+                    text_parts.append(f"System Information: {os_version}")
+
+                if host_info.get('first_seen'):
+                    text_parts.append(f"First Activity: {host_info['first_seen']}")
+                    text_parts.append(f"First Seen: {host_info['first_seen']}")
+                    text_parts.append(f"Initial Activity Timestamp: {host_info['first_seen']}")
+
+                if host_info.get('last_seen'):
+                    text_parts.append(f"Last Activity: {host_info['last_seen']}")
+                    text_parts.append(f"Last Seen: {host_info['last_seen']}")
+
+                text_parts.append(f"Total Packets: {host_info.get('total_packets', 0)}")
+                text_parts.append(f"Compromised: YES")
+                text_parts.append(f"Infection Status: INFECTED")
+                text_parts.append(f"Threat Detected: YES")
+                text_parts.append("")
+
+                # Add malicious connections
+                if host_info.get('malicious_connections'):
+                    text_parts.append("MALICIOUS ACTIVITY DETECTED:")
+                    for conn in host_info['malicious_connections'][:10]:
+                        text_parts.append(f"  [{conn.get('timestamp', 'N/A')}] Connected to malicious {conn.get('type', 'entity')}: {conn.get('value', 'unknown')}")
+                    text_parts.append("")
+
+        # Add all hosts (including non-infected) for reference
+        all_hosts = forensic_data.get('hosts', {})
+        if all_hosts:
+            text_parts.append("=== ALL HOSTS IN NETWORK ===")
+            for ip, host_info in list(all_hosts.items())[:20]:  # Limit to 20 hosts
+                host_desc = f"Host {ip}"
+                if host_info.get('hostnames'):
+                    host_desc += f" (Hostname: {host_info['hostnames'][0]})"
+                if host_info.get('mac_addresses'):
+                    host_desc += f" [MAC: {host_info['mac_addresses'][0]}]"
+                if host_info.get('user_accounts'):
+                    host_desc += f" User: {host_info['user_accounts'][0]}"
+                text_parts.append(host_desc)
+            text_parts.append("")
+
+        # Add infection timeline
+        if forensic_data.get('infection_timeline'):
+            text_parts.append("=== INFECTION TIMELINE ===")
+            text_parts.append("Chronological sequence of malware infection events:")
+            text_parts.append("")
+            for event in forensic_data['infection_timeline'][:15]:  # Limit to first 15 events
+                timestamp = event.get('timestamp', 'N/A')
+                description = event.get('description', 'Unknown event')
+                text_parts.append(f"[{timestamp}] {description}")
+            text_parts.append("")
+
+        # Add ARP table
+        if forensic_data.get('arp_table'):
+            text_parts.append("=== ARP TABLE (MAC to IP Mappings) ===")
+            for ip, mac in list(forensic_data['arp_table'].items())[:15]:
+                text_parts.append(f"{ip} -> {mac}")
+            text_parts.append("")
+
+        # Add network topology
+        if forensic_data.get('network_topology'):
+            topo = forensic_data['network_topology']
+            if topo.get('internal_ips'):
+                text_parts.append(f"Internal Network IPs: {', '.join(topo['internal_ips'][:10])}")
+            if topo.get('external_ips'):
+                text_parts.append(f"External IPs Contacted: {len(topo['external_ips'])} unique addresses")
+
+        text_parts.append("")
+        text_parts.append("NOTE: This forensic metadata was extracted from multiple protocol layers including:")
+        text_parts.append("- Layer 2 (Ethernet/MAC addresses)")
+        text_parts.append("- DHCP (hostname, domain name)")
+        text_parts.append("- NetBIOS/NBNS (computer name, workgroup)")
+        text_parts.append("- Kerberos (user authentication, realm)")
+        text_parts.append("- SMB/SMB2 (OS version, domain, file access)")
+        text_parts.append("- ARP (MAC to IP mappings)")
+        text_parts.append("- Combined with VirusTotal threat intelligence")
+
+        return {
+            'chunk_index': chunk_index,
+            'packet_range': {'start': -1, 'end': -1},
+            'chunk_text': '\n'.join(text_parts),
+            'metadata': {
+                'chunk_type': 'forensic_metadata',
+                'has_forensic_data': True,
+                'priority': 'highest',
+                'infected_host_count': len(infected_hosts) if infected_hosts else 0,
+                'total_host_count': len(all_hosts),
+                'has_timeline': bool(forensic_data.get('infection_timeline')),
+                'ip_addresses': list(infected_hosts.keys()) if infected_hosts else [],
+                'domains': [],
+                'protocols': [],
+                'timestamp_range': {'start': None, 'end': None},
+                'packet_count': 0,
+                'threat_count': len(infected_hosts) if infected_hosts else 0,
+                'has_threats': bool(infected_hosts)
+            }
+        }
 
     def extract_metadata_from_chunk(self, chunk: Dict[str, Any]) -> Dict[str, Any]:
         return chunk.get('metadata', {})

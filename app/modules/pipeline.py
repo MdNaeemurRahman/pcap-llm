@@ -135,6 +135,17 @@ class AnalysisPipeline:
 
             enriched_full = self.vt_client.enrich_json_with_vt(full_data, vt_results)
 
+            # Re-aggregate forensic metadata with VT results for infection detection
+            print("Re-aggregating forensic metadata with VirusTotal threat intelligence...")
+            forensic_analysis = parser._aggregate_forensic_metadata(
+                enriched_full.get('packets', []),
+                {},  # forensic_trackers not available here, will rebuild from packets
+                {'unique_ips': set(enriched_full['unique_entities']['ips']),
+                 'unique_domains': set(enriched_full['unique_entities']['domains'])},
+                vt_results
+            )
+            enriched_full['forensic_analysis'] = forensic_analysis
+
             enriched_output = self.json_outputs_dir / f"{analysis_id}_full_enriched.json"
             with open(enriched_output, 'w') as f:
                 json.dump(enriched_full, f, indent=2)
