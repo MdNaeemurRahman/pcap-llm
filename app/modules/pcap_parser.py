@@ -6,6 +6,14 @@ from collections import Counter
 import pyshark
 
 
+class SetEncoder(json.JSONEncoder):
+    """Custom JSON encoder that converts sets to lists"""
+    def default(self, obj):
+        if isinstance(obj, set):
+            return list(obj)
+        return super().default(obj)
+
+
 class PCAPParser:
     def __init__(self, file_path: str):
         self.file_path = file_path
@@ -1548,7 +1556,7 @@ class PCAPParser:
             full_data['statistics']['conversion_complete'] = False
 
         with open(output_path, 'w') as f:
-            json.dump(full_data, f, indent=2)
+            json.dump(full_data, f, indent=2, cls=SetEncoder)
 
         return full_data
 

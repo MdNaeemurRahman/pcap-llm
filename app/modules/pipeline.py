@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional
-from .pcap_parser import PCAPParser
+from .pcap_parser import PCAPParser, SetEncoder
 from .virustotal_client import VirusTotalClient
 from .text_chunker import TextChunker
 from .ollama_client import OllamaClient
@@ -63,14 +63,14 @@ class AnalysisPipeline:
 
             vt_output = self.json_outputs_dir / f"{analysis_id}_virustotal.json"
             with open(vt_output, 'w') as f:
-                json.dump(vt_results, f, indent=2)
+                json.dump(vt_results, f, indent=2, cls=SetEncoder)
             print(f"Saved VirusTotal results to: {vt_output}")
 
             enriched_summary = self.vt_client.enrich_json_with_vt(summary, vt_results)
 
             enriched_output = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
             with open(enriched_output, 'w') as f:
-                json.dump(enriched_summary, f, indent=2)
+                json.dump(enriched_summary, f, indent=2, cls=SetEncoder)
 
             self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
 
@@ -130,7 +130,7 @@ class AnalysisPipeline:
 
             vt_output = self.json_outputs_dir / f"{analysis_id}_virustotal.json"
             with open(vt_output, 'w') as f:
-                json.dump(vt_results, f, indent=2)
+                json.dump(vt_results, f, indent=2, cls=SetEncoder)
             print(f"Saved VirusTotal results to: {vt_output}")
 
             enriched_full = self.vt_client.enrich_json_with_vt(full_data, vt_results)
@@ -148,7 +148,7 @@ class AnalysisPipeline:
 
             enriched_output = self.json_outputs_dir / f"{analysis_id}_full_enriched.json"
             with open(enriched_output, 'w') as f:
-                json.dump(enriched_full, f, indent=2)
+                json.dump(enriched_full, f, indent=2, cls=SetEncoder)
 
             self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
 
@@ -223,14 +223,14 @@ class AnalysisPipeline:
 
             vt_output = self.json_outputs_dir / f"{analysis_id}_virustotal.json"
             with open(vt_output, 'w') as f:
-                json.dump(vt_results, f, indent=2)
+                json.dump(vt_results, f, indent=2, cls=SetEncoder)
             print(f"Saved VirusTotal results to: {vt_output}")
 
             enriched_summary = self.vt_client.enrich_json_with_vt(summary, vt_results)
 
             enriched_output = self.json_outputs_dir / f"{analysis_id}_summary_enriched.json"
             with open(enriched_output, 'w') as f:
-                json.dump(enriched_summary, f, indent=2)
+                json.dump(enriched_summary, f, indent=2, cls=SetEncoder)
 
             self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
 
