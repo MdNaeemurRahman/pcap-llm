@@ -5,6 +5,13 @@ from typing import Dict, List, Any, Optional
 from pathlib import Path
 from datetime import datetime, timedelta
 from .ollama_embedding_function import OllamaEmbeddingFunction
+import re
+try:
+    from rank_bm25 import BM25Okapi
+    BM25_AVAILABLE = True
+except ImportError:
+    BM25_AVAILABLE = False
+    print("[Warning] rank-bm25 not installed. Run: pip install rank-bm25")
 
 
 class VectorStoreManager:
@@ -182,6 +189,137 @@ class VectorStoreManager:
         except Exception as e:
             print(f"Error during similarity search: {str(e)}")
             return {'chunks': [], 'count': 0}
+
+    def hybrid_search(
+        self,
+        collection_name: str,
+        query_text: str,
+        n_results: int = 5,
+        alpha: float = 0.5,
+        where: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Hybrid search combining vector similarity and BM25 keyword matching.
+
+        Args:
+            collection_name: Name of the collection to search
+            query_text: Query string
+            n_results: Number of results to return
+            alpha: Blend factor (0.0 = pure BM25, 1.0 = pure vector, 0.5 = balanced)
+            where: Optional metadata filter
+
+        Returns:
+            Dictionary with 'chunks' and 'count'
+        """
+        if not BM25_AVAILABLE:
+            print("[Hybrid Search] BM25 not available, falling back to pure vector search")
+            return self.similarity_search(collection_name, query_text, n_results, where)
+
+        try:
+            print(f"[Hybrid Search] Starting hybrid search (alpha={alpha}) in collection: {collection_name}")
+            collection = self.client.get_collection(
+                name=collection_name,
+                embedding_function=self.embedding_function
+            )
+
+            # Get ALL documents from collection for BM25 (we need full corpus)
+            # Limit to first 1000 documents to avoid memory issues
+            all_docs_result = collection.get(
+                limit=1000,
+                include=['documents', 'metadatas']
+            )
+
+            if not all_docs_result['documents']:
+                print("[Hybrid Search] No documents in collection")
+                return {'chunks': [], 'count': 0}
+
+            all_documents = all_docs_result['documents']
+            all_metadatas = all_docs_result['metadatas']
+            all_ids = all_docs_result['ids']
+
+            print(f"[Hybrid Search] Retrieved {len(all_documents)} documents from collection")
+
+            # Perform vector similarity search
+            print(f"[Hybrid Search] Performing vector similarity search...")
+            vector_results = self.similarity_search(collection_name, query_text, n_results=min(n_results * 3, 20), where=where)
+
+            # Build BM25 index
+            print(f"[Hybrid Search] Building BM25 index...")
+            tokenized_corpus = [self._tokenize_for_bm25(doc) for doc in all_documents]
+            bm25 = BM25Okapi(tokenized_corpus)
+
+            # Perform BM25 search
+            print(f"[Hybrid Search] Performing BM25 keyword search...")
+            tokenized_query = self._tokenize_for_bm25(query_text)
+            bm25_scores = bm25.get_scores(tokenized_query)
+
+            # Create document ID to index mapping
+            doc_id_to_idx = {doc_id: idx for idx, doc_id in enumerate(all_ids)}
+
+            # Combine scores for vector results
+            combined_results = []
+
+            for chunk in vector_results['chunks']:
+                # Get vector similarity (convert distance to similarity)
+                distance = chunk.get('distance', 1.0)
+                vector_similarity = 1 - distance
+
+                # Find BM25 score for this document
+                # We need to find which document this is in the all_documents list
+                chunk_text = chunk['text']
+                bm25_score = 0.0
+
+                # Try to find matching document by text
+                for idx, doc in enumerate(all_documents):
+                    if doc == chunk_text:
+                        bm25_score = bm25_scores[idx]
+                        break
+
+                # Normalize BM25 score to 0-1 range
+                max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1.0
+                normalized_bm25 = bm25_score / max_bm25 if max_bm25 > 0 else 0.0
+
+                # Combine scores
+                combined_score = alpha * vector_similarity + (1 - alpha) * normalized_bm25
+
+                chunk['combined_score'] = combined_score
+                chunk['vector_score'] = vector_similarity
+                chunk['bm25_score'] = normalized_bm25
+                combined_results.append(chunk)
+
+                print(f"[Hybrid Search] Doc: vector={vector_similarity:.3f}, bm25={normalized_bm25:.3f}, combined={combined_score:.3f}")
+
+            # Sort by combined score
+            combined_results.sort(key=lambda x: x['combined_score'], reverse=True)
+
+            # Take top n_results
+            top_results = combined_results[:n_results]
+
+            print(f"[Hybrid Search] Returning top {len(top_results)} results")
+            print(f"[Hybrid Search] Top 3 combined scores: {[r['combined_score'] for r in top_results[:3]]}")
+
+            return {
+                'chunks': top_results,
+                'count': len(top_results)
+            }
+
+        except Exception as e:
+            print(f"[Hybrid Search] Error during hybrid search: {str(e)}")
+            print(f"[Hybrid Search] Falling back to pure vector search")
+            return self.similarity_search(collection_name, query_text, n_results, where)
+
+    def _tokenize_for_bm25(self, text: str) -> List[str]:
+        """Tokenize text for BM25. Keep technical terms intact."""
+        # Lowercase
+        text = text.lower()
+
+        # Split on whitespace and punctuation, but keep dots in IP addresses
+        tokens = re.findall(r'\b[\w\.]+\b', text)
+
+        # Remove very short tokens (but keep IPs)
+        tokens = [t for t in tokens if len(t) >= 2 or '.' in t]
+
+        return tokens
 
     def get_collection_by_pcap_id(self, pcap_id: str) -> Optional[Collection]:
         collection_name = f"pcap_{pcap_id}"

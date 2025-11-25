@@ -162,21 +162,42 @@ class ChatHandler:
 
             enriched_query = self._enrich_query_with_context(query, formatted_history)
             expanded_query = self._expand_query(enriched_query, query_classification)
-            print(f"Performing similarity search with query: '{expanded_query}'")
-            search_results = self.vector_store.similarity_search(
-                collection_name=f"pcap_{analysis_id}",
-                query_text=expanded_query,
-                n_results=top_k
-            )
+
+            # Use hybrid search for forensic queries, vector search for others
+            if self._is_forensic_query(query):
+                print(f"[Search Mode] Using HYBRID search for forensic query")
+                print(f"Performing hybrid search with query: '{expanded_query}'")
+                search_results = self.vector_store.hybrid_search(
+                    collection_name=f"pcap_{analysis_id}",
+                    query_text=expanded_query,
+                    n_results=top_k,
+                    alpha=0.4  # Favor BM25 for exact keyword matching (60% BM25, 40% vector)
+                )
+            else:
+                print(f"[Search Mode] Using VECTOR search for general query")
+                print(f"Performing similarity search with query: '{expanded_query}'")
+                search_results = self.vector_store.similarity_search(
+                    collection_name=f"pcap_{analysis_id}",
+                    query_text=expanded_query,
+                    n_results=top_k
+                )
 
             if search_results['count'] == 0:
                 print("No relevant chunks found, falling back to summary-based response")
                 return self._handle_fallback_to_summary(analysis_id, query)
 
-            filtered_chunks = self._filter_chunks_by_relevance(search_results['chunks'], threshold=0.7)
+            # Pass query to enable forensic-specific threshold
+            filtered_chunks = self._filter_chunks_by_relevance(search_results['chunks'], query=query)
 
             if len(filtered_chunks) == 0:
-                print("All chunks filtered out due to low relevance, using fallback")
+                print("All chunks filtered out due to low relevance")
+                # Try direct JSON fallback for forensic queries before giving up
+                if self._is_forensic_query(query):
+                    print("[Fallback] Attempting direct JSON forensic data extraction...")
+                    json_answer = self._direct_json_forensic_fallback(analysis_id, query)
+                    if json_answer:
+                        return json_answer
+                print("Using summary fallback")
                 return self._handle_fallback_to_summary(analysis_id, query)
 
             context = self._format_rag_context(filtered_chunks)
@@ -742,22 +763,155 @@ Just ask your question naturally, and I'll search through the network traffic an
 
         return query
 
-    def _filter_chunks_by_relevance(self, chunks: List[Dict[str, Any]], threshold: float = 0.7) -> List[Dict[str, Any]]:
+    def _filter_chunks_by_relevance(self, chunks: List[Dict[str, Any]], threshold: float = 0.6, query: str = "") -> List[Dict[str, Any]]:
+        """Filter chunks by similarity threshold. Uses lower threshold for forensic queries."""
         if not chunks:
             return []
 
+        # Use even lower threshold for forensic queries
+        if self._is_forensic_query(query):
+            threshold = 0.55
+            print(f"[Threshold] Using forensic query threshold: {threshold}")
+        else:
+            print(f"[Threshold] Using standard threshold: {threshold}")
+
         filtered = []
         for chunk in chunks:
-            distance = chunk.get('distance', 1.0)
-            similarity = 1 - distance
-
-            if similarity >= threshold:
-                filtered.append(chunk)
+            # Check if this is a hybrid search result (has combined_score)
+            if 'combined_score' in chunk:
+                # Use combined score for hybrid results
+                score = chunk['combined_score']
+                score_type = "combined"
+                # Log individual scores for debugging
+                vector_score = chunk.get('vector_score', 0)
+                bm25_score = chunk.get('bm25_score', 0)
+                print(f"[Filter] Hybrid scores - vector: {vector_score:.3f}, bm25: {bm25_score:.3f}, combined: {score:.3f}")
             else:
-                print(f"Filtered out chunk with similarity {similarity:.3f} (below threshold {threshold})")
+                # Use similarity for pure vector results
+                distance = chunk.get('distance', 1.0)
+                score = 1 - distance
+                score_type = "similarity"
 
-        print(f"Filtered {len(chunks)} chunks -> {len(filtered)} relevant chunks")
+            if score >= threshold:
+                filtered.append(chunk)
+                print(f"[Filter] ✓ Accepted chunk with {score_type} {score:.3f} (above threshold {threshold})")
+            else:
+                print(f"[Filter] ✗ Rejected chunk with {score_type} {score:.3f} (below threshold {threshold})")
+
+        print(f"[Filter] Filtered {len(chunks)} chunks -> {len(filtered)} relevant chunks")
         return filtered
+
+    def _is_forensic_query(self, query: str) -> bool:
+        """Detect if query is asking for forensic host identification data."""
+        query_lower = query.lower()
+        forensic_keywords = [
+            'hostname', 'host name', 'computer name', 'machine name',
+            'mac address', 'hardware address', 'physical address',
+            'ip address', 'ip of', 'ip for',
+            'user account', 'username', 'user name', 'logged in user',
+            'domain name', 'windows domain', 'ad domain',
+            'infected client', 'compromised host', 'infected host',
+            'victim computer', 'victim machine', 'victim host',
+            'what is the', 'find the', 'tell me the'
+        ]
+        return any(keyword in query_lower for keyword in forensic_keywords)
+
+    def _direct_json_forensic_fallback(self, analysis_id: str, query: str) -> Optional[Dict[str, Any]]:
+        """
+        Direct JSON fallback for forensic queries when RAG fails.
+        Extracts answer directly from the JSON file without RAG.
+        """
+        try:
+            import json
+            import re
+
+            # Load the full JSON file
+            json_file = self.json_outputs_dir / f"{analysis_id}_full.json"
+            if not json_file.exists():
+                print(f"[JSON Fallback] JSON file not found: {json_file}")
+                return None
+
+            with open(json_file, 'r') as f:
+                full_data = json.load(f)
+
+            forensic_analysis = full_data.get('forensic_analysis', {})
+            infected_hosts = forensic_analysis.get('infected_hosts', [])
+
+            if not infected_hosts:
+                print("[JSON Fallback] No infected hosts found in JSON")
+                return None
+
+            # Get the first (primary) infected host
+            infected_host = infected_hosts[0]
+            query_lower = query.lower()
+
+            # Pattern matching to extract requested attribute
+            answer = None
+            attribute = None
+
+            if any(keyword in query_lower for keyword in ['ip address', 'ip of']):
+                answer = infected_host.get('ip', 'Unknown')
+                attribute = 'IP address'
+            elif any(keyword in query_lower for keyword in ['hostname', 'host name', 'computer name', 'machine name']):
+                answer = infected_host.get('hostname', 'Unknown')
+                attribute = 'hostname'
+                # Mention data source
+                data_source = infected_host.get('data_sources', {}).get('hostname', 'network protocol analysis')
+            elif any(keyword in query_lower for keyword in ['mac address', 'hardware address', 'physical address']):
+                answer = infected_host.get('mac', 'Unknown')
+                attribute = 'MAC address'
+                data_source = infected_host.get('data_sources', {}).get('mac', 'ARP table')
+            elif any(keyword in query_lower for keyword in ['user account', 'username', 'user name', 'logged in']):
+                answer = infected_host.get('user_account', 'Unknown')
+                attribute = 'user account'
+                data_source = infected_host.get('data_sources', {}).get('user_account', 'authentication records')
+            elif any(keyword in query_lower for keyword in ['domain', 'windows domain']):
+                answer = infected_host.get('domain', 'Unknown')
+                attribute = 'domain'
+                data_source = infected_host.get('data_sources', {}).get('domain', 'DHCP or Kerberos')
+            elif any(keyword in query_lower for keyword in ['os', 'operating system']):
+                answer = infected_host.get('os_info', 'Unknown')
+                attribute = 'operating system'
+                data_source = infected_host.get('data_sources', {}).get('os_info', 'SMB protocol')
+
+            if answer and answer != 'Unknown':
+                print(f"[JSON Fallback] ✓ Found {attribute}: {answer}")
+
+                # Build a natural response
+                if attribute == 'IP address':
+                    response_text = f"The infected client IP address is **{answer}**."
+                elif attribute == 'hostname':
+                    response_text = f"The infected client hostname is **{answer}**. This information was obtained from {data_source}."
+                elif attribute == 'MAC address':
+                    response_text = f"The infected client MAC address (hardware address) is **{answer}**. This was identified from the {data_source}."
+                elif attribute == 'user account':
+                    response_text = f"The user account logged into the infected host is **{answer}**. This was identified through {data_source}."
+                elif attribute == 'domain':
+                    response_text = f"The Windows domain is **{answer}**. This was identified from {data_source}."
+                elif attribute == 'operating system':
+                    response_text = f"The operating system is **{answer}**. This information was obtained from the {data_source}."
+                else:
+                    response_text = f"The {attribute} is **{answer}**."
+
+                # Add infection context
+                response_text += f"\n\nThis system (IP {infected_host.get('ip', 'unknown')}) has been identified as infected with "
+                response_text += f"{infected_host.get('infection_confidence', 'medium')} confidence based on "
+                response_text += f"{infected_host.get('malicious_connections_count', 0)} malicious connections detected."
+
+                return {
+                    'status': 'success',
+                    'response': response_text,
+                    'method': 'direct_json_fallback'
+                }
+
+            print(f"[JSON Fallback] Could not determine what attribute user is asking about")
+            return None
+
+        except Exception as e:
+            print(f"[JSON Fallback] Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _handle_fallback_to_summary(self, analysis_id: str, query: str) -> Dict[str, Any]:
         try:
