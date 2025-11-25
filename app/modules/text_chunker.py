@@ -1,10 +1,15 @@
 import json
 from typing import Dict, List, Any, Optional
+from .json_flattener import JSONFlattener
 
 
 class TextChunker:
-    def __init__(self, max_chunk_size: int = 100):
+    def __init__(self, max_chunk_size: int = 100, use_json_flattening: bool = False):
         self.max_chunk_size = max_chunk_size
+        self.use_json_flattening = use_json_flattening
+        if use_json_flattening:
+            self.json_flattener = JSONFlattener()
+            print("[TextChunker] Using JSON flattening mode for better structured data embedding")
 
     def _normalize_vt_results(self, vt_results: Any) -> Dict[str, Any]:
         """Normalize VT results to dictionary format with 'results' key."""
@@ -198,8 +203,10 @@ class TextChunker:
         }
 
     def _format_chunk_for_embedding(self, packets: List[Dict[str, Any]], ips: set, domains: set, protocols: set, threats: List[Dict[str, Any]]) -> str:
-        text_parts = []
+        if self.use_json_flattening:
+            return self.json_flattener.flatten_packet_data(packets, ips, domains, protocols, threats)
 
+        text_parts = []
         text_parts.append(f"Network traffic segment with {len(packets)} packets.")
 
         if threats:
@@ -420,6 +427,41 @@ class TextChunker:
 
     def _create_infected_host_id_chunk(self, infected_host: Dict[str, Any], chunk_index: int) -> Dict[str, Any]:
         """Create focused chunk for infected host identification with extensive keyword repetition."""
+        if self.use_json_flattening:
+            chunk_text = self.json_flattener.flatten_infected_host(infected_host)
+        else:
+            chunk_text = self._create_infected_host_keyword_version(infected_host)
+
+        ip = infected_host['ip']
+        mac = infected_host.get('mac', 'Unknown')
+        hostname = infected_host.get('hostname', 'Unknown')
+        user = infected_host.get('user_account', 'Unknown')
+        domain = infected_host.get('domain', 'Unknown')
+
+        return {
+            'chunk_index': chunk_index,
+            'packet_range': {'start': -1, 'end': -1},
+            'chunk_text': chunk_text,
+            'metadata': {
+                'chunk_type': 'infected_host_identification',
+                'has_forensic_data': True,
+                'priority': 'highest',
+                'infected_ip': ip,
+                'hostname': hostname,
+                'mac_address': mac,
+                'user_account': user,
+                'ip_addresses': [ip],
+                'domains': [domain] if domain != 'Unknown' else [],
+                'protocols': [],
+                'timestamp_range': {'start': None, 'end': None},
+                'packet_count': 0,
+                'threat_count': 1,
+                'has_threats': True
+            }
+        }
+
+    def _create_infected_host_keyword_version(self, infected_host: Dict[str, Any]) -> str:
+        """Original keyword repetition version for Ollama embeddings."""
         text_parts = []
 
         ip = infected_host['ip']
@@ -555,49 +597,33 @@ class TextChunker:
             summary += f" The user account {user} was logged in when the infection occurred."
         text_parts.append(summary)
 
-        return {
-            'chunk_index': chunk_index,
-            'packet_range': {'start': -1, 'end': -1},
-            'chunk_text': '\n'.join(text_parts),
-            'metadata': {
-                'chunk_type': 'infected_host_identification',
-                'has_forensic_data': True,
-                'priority': 'highest',
-                'infected_ip': ip,
-                'hostname': hostname,
-                'mac_address': mac,
-                'user_account': user,
-                'ip_addresses': [ip],
-                'domains': [domain] if domain != 'Unknown' else [],
-                'protocols': [],
-                'timestamp_range': {'start': None, 'end': None},
-                'packet_count': 0,
-                'threat_count': 1,
-                'has_threats': True
-            }
-        }
+        return '\n'.join(text_parts)
 
     def _create_infection_timeline_chunk(self, forensic_data: Dict[str, Any], chunk_index: int) -> Dict[str, Any]:
         """Create focused chunk for infection timeline."""
-        text_parts = []
-
-        text_parts.append("=== INFECTION TIMELINE ===")
-        text_parts.append("Chronological sequence of malware infection events:")
-        text_parts.append("")
-
         timeline = forensic_data.get('infection_timeline', [])
-        for event in timeline[:15]:
-            timestamp = event.get('timestamp', 'N/A')
-            description = event.get('description', 'Unknown event')
-            text_parts.append(f"[{timestamp}] {description}")
 
-        text_parts.append("")
-        text_parts.append(f"Total timeline events: {len(timeline)}")
+        if self.use_json_flattening:
+            chunk_text = self.json_flattener.flatten_timeline(timeline)
+        else:
+            text_parts = []
+            text_parts.append("=== INFECTION TIMELINE ===")
+            text_parts.append("Chronological sequence of malware infection events:")
+            text_parts.append("")
+
+            for event in timeline[:15]:
+                timestamp = event.get('timestamp', 'N/A')
+                description = event.get('description', 'Unknown event')
+                text_parts.append(f"[{timestamp}] {description}")
+
+            text_parts.append("")
+            text_parts.append(f"Total timeline events: {len(timeline)}")
+            chunk_text = '\n'.join(text_parts)
 
         return {
             'chunk_index': chunk_index,
             'packet_range': {'start': -1, 'end': -1},
-            'chunk_text': '\n'.join(text_parts),
+            'chunk_text': chunk_text,
             'metadata': {
                 'chunk_type': 'infection_timeline',
                 'has_forensic_data': True,
@@ -614,38 +640,43 @@ class TextChunker:
 
     def _create_all_hosts_inventory_chunk(self, forensic_data: Dict[str, Any], chunk_index: int) -> Dict[str, Any]:
         """Create focused chunk for all network hosts inventory."""
-        text_parts = []
-
-        text_parts.append("=== ALL NETWORK HOSTS INVENTORY ===")
-        text_parts.append("Complete list of hosts identified in the network:")
-        text_parts.append("")
-
         all_hosts = forensic_data.get('hosts', {})
-        for ip, host_info in list(all_hosts.items())[:30]:
-            host_desc = f"Host {ip}"
-            if host_info.get('hostnames'):
-                host_desc += f" - Hostname: {host_info['hostnames'][0]}"
-            if host_info.get('mac_addresses'):
-                host_desc += f" - MAC: {host_info['mac_addresses'][0]}"
-            if host_info.get('user_accounts'):
-                host_desc += f" - User: {host_info['user_accounts'][0]}"
-            host_desc += f" - Status: {'INFECTED' if host_info.get('is_infected') else 'Clean'}"
-            text_parts.append(host_desc)
+        arp_table = forensic_data.get('arp_table')
 
-        text_parts.append("")
-        text_parts.append(f"Total hosts: {len(all_hosts)}")
-
-        # ARP table
-        if forensic_data.get('arp_table'):
+        if self.use_json_flattening:
+            chunk_text = self.json_flattener.flatten_hosts_inventory(all_hosts, arp_table)
+        else:
+            text_parts = []
+            text_parts.append("=== ALL NETWORK HOSTS INVENTORY ===")
+            text_parts.append("Complete list of hosts identified in the network:")
             text_parts.append("")
-            text_parts.append("=== ARP TABLE (MAC to IP Mappings) ===")
-            for ip, mac in list(forensic_data['arp_table'].items())[:20]:
-                text_parts.append(f"{ip} -> {mac}")
+
+            for ip, host_info in list(all_hosts.items())[:30]:
+                host_desc = f"Host {ip}"
+                if host_info.get('hostnames'):
+                    host_desc += f" - Hostname: {host_info['hostnames'][0]}"
+                if host_info.get('mac_addresses'):
+                    host_desc += f" - MAC: {host_info['mac_addresses'][0]}"
+                if host_info.get('user_accounts'):
+                    host_desc += f" - User: {host_info['user_accounts'][0]}"
+                host_desc += f" - Status: {'INFECTED' if host_info.get('is_infected') else 'Clean'}"
+                text_parts.append(host_desc)
+
+            text_parts.append("")
+            text_parts.append(f"Total hosts: {len(all_hosts)}")
+
+            if arp_table:
+                text_parts.append("")
+                text_parts.append("=== ARP TABLE (MAC to IP Mappings) ===")
+                for ip, mac in list(arp_table.items())[:20]:
+                    text_parts.append(f"{ip} -> {mac}")
+
+            chunk_text = '\n'.join(text_parts)
 
         return {
             'chunk_index': chunk_index,
             'packet_range': {'start': -1, 'end': -1},
-            'chunk_text': '\n'.join(text_parts),
+            'chunk_text': chunk_text,
             'metadata': {
                 'chunk_type': 'hosts_inventory',
                 'has_forensic_data': True,

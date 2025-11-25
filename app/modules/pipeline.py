@@ -15,16 +15,31 @@ class AnalysisPipeline:
         supabase_manager: SupabaseManager,
         vt_client: VirusTotalClient,
         ollama_client: OllamaClient,
-        vector_store: VectorStoreManager,
+        vector_db_dir: str,
+        ollama_base_url: str,
+        ollama_embedding_model: str,
+        huggingface_model: str,
         uploads_dir: str,
         json_outputs_dir: str
     ):
         self.supabase = supabase_manager
         self.vt_client = vt_client
         self.ollama = ollama_client
-        self.vector_store = vector_store
+        self.vector_db_dir = vector_db_dir
+        self.ollama_base_url = ollama_base_url
+        self.ollama_embedding_model = ollama_embedding_model
+        self.huggingface_model = huggingface_model
         self.uploads_dir = Path(uploads_dir)
         self.json_outputs_dir = Path(json_outputs_dir)
+
+    def _create_vector_store(self, embedding_method: str = "ollama") -> VectorStoreManager:
+        return VectorStoreManager(
+            persist_directory=self.vector_db_dir,
+            embedding_method=embedding_method,
+            ollama_base_url=self.ollama_base_url,
+            ollama_model=self.ollama_embedding_model,
+            huggingface_model=self.huggingface_model
+        )
 
     def process_option1(self, file_path: str, filename: str, analysis_id: str) -> Dict[str, Any]:
         try:
@@ -93,7 +108,7 @@ class AnalysisPipeline:
                 'message': str(e)
             }
 
-    def process_option2(self, file_path: str, filename: str, analysis_id: str) -> Dict[str, Any]:
+    def process_option2(self, file_path: str, filename: str, analysis_id: str, embedding_method: str = "ollama") -> Dict[str, Any]:
         try:
             print(f"\n=== Starting Option 2 Analysis for {filename} ===")
 
@@ -153,16 +168,23 @@ class AnalysisPipeline:
             self.supabase.bulk_insert_vt_results(analysis_id, vt_results)
 
             self.supabase.update_analysis_status(analysis_id, 'embedding')
-            print("Chunking and embedding data with VirusTotal intelligence...")
+            print(f"Chunking and embedding data with {embedding_method} embedding...")
 
-            chunker = TextChunker(max_chunk_size=100)
+            use_json_flattening = (embedding_method == "huggingface")
+            chunker = TextChunker(max_chunk_size=100, use_json_flattening=use_json_flattening)
             chunks = chunker.chunk_by_packet_range(enriched_full, vt_results)
 
             print(f"Created {len(chunks)} chunks (with integrated threat intelligence)")
 
-            print("Storing in vector database...")
-            collection = self.vector_store.create_collection_for_pcap(analysis_id, delete_existing=True)
-            self.vector_store.add_chunks_to_collection(f"pcap_{analysis_id}", chunks)
+            print(f"Storing in vector database using {embedding_method} embedding...")
+            vector_store = self._create_vector_store(embedding_method)
+            collection = vector_store.create_collection_for_pcap(analysis_id, delete_existing=True)
+
+            method_suffix = "hf" if embedding_method == "huggingface" else "ollama"
+            collection_name = f"pcap_{analysis_id}_{method_suffix}"
+            vector_store.add_chunks_to_collection(collection_name, chunks)
+
+            self.supabase.store_embedding_method(analysis_id, embedding_method)
 
             self.supabase.bulk_insert_chunks_metadata(analysis_id, chunks)
 

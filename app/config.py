@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     ollama_embedding_model: str = Field(default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL")
     ollama_llm_model: str = Field(default="llama3.2", alias="OLLAMA_LLM_MODEL")
 
+    embedding_method: str = Field(default="ollama", alias="EMBEDDING_METHOD")
+    huggingface_model: str = Field(default="all-MiniLM-L6-v2", alias="HUGGINGFACE_MODEL")
+
     virustotal_api_key: str = Field(alias="VIRUSTOTAL_API_KEY")
 
     base_dir: Path = Path(__file__).parent.parent

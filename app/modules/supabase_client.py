@@ -123,6 +123,33 @@ class SupabaseManager:
             print(f"Error updating analysis status: {str(e)}")
             return False
 
+    def store_embedding_method(self, analysis_id: str, embedding_method: str) -> bool:
+        try:
+            update_data = {
+                'embedding_method': embedding_method,
+                'updated_at': datetime.utcnow().isoformat()
+            }
+
+            result = self.client.table('pcap_analyses').update(update_data).eq('id', analysis_id).execute()
+
+            print(f"[Supabase] Stored embedding method '{embedding_method}' for analysis {analysis_id}")
+            return bool(result.data)
+        except Exception as e:
+            print(f"Error storing embedding method: {str(e)}")
+            return False
+
+    def get_embedding_method(self, analysis_id: str) -> str:
+        try:
+            result = self.client.table('pcap_analyses').select('embedding_method').eq('id', analysis_id).execute()
+
+            if result.data and len(result.data) > 0:
+                return result.data[0].get('embedding_method', 'ollama')
+
+            return 'ollama'
+        except Exception as e:
+            print(f"Error getting embedding method: {str(e)}")
+            return 'ollama'
+
     def _convert_timestamp_to_iso(self, timestamp_value: Any) -> Optional[str]:
         """Convert Unix timestamp (int or string) to ISO format datetime string."""
         if timestamp_value is None:

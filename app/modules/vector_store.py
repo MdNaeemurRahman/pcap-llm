@@ -5,6 +5,7 @@ from typing import Dict, List, Any, Optional
 from pathlib import Path
 from datetime import datetime, timedelta
 from .ollama_embedding_function import OllamaEmbeddingFunction
+from .huggingface_embedding_function import HuggingFaceEmbeddingFunction
 import re
 try:
     from rank_bm25 import BM25Okapi
@@ -18,18 +19,32 @@ class VectorStoreManager:
     def __init__(
         self,
         persist_directory: str,
-        ollama_base_url: str,
-        embedding_model: str = "nomic-embed-text"
+        embedding_method: str = "ollama",
+        ollama_base_url: str = None,
+        ollama_model: str = "nomic-embed-text",
+        huggingface_model: str = "all-MiniLM-L6-v2"
     ):
         self.persist_directory = Path(persist_directory)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
-        self.ollama_base_url = ollama_base_url
-        self.embedding_model = embedding_model
+        self.embedding_method = embedding_method
 
-        self.embedding_function = OllamaEmbeddingFunction(
-            base_url=ollama_base_url,
-            model=embedding_model
-        )
+        if embedding_method == "ollama":
+            if not ollama_base_url:
+                raise ValueError("ollama_base_url is required when embedding_method is 'ollama'")
+            self.embedding_model = ollama_model
+            self.embedding_function = OllamaEmbeddingFunction(
+                base_url=ollama_base_url,
+                model=ollama_model
+            )
+            print(f"[VectorStore] Using Ollama embedding: {ollama_model}")
+        elif embedding_method == "huggingface":
+            self.embedding_model = huggingface_model
+            self.embedding_function = HuggingFaceEmbeddingFunction(
+                model_name=huggingface_model
+            )
+            print(f"[VectorStore] Using HuggingFace embedding: {huggingface_model}")
+        else:
+            raise ValueError(f"Invalid embedding_method: {embedding_method}. Must be 'ollama' or 'huggingface'")
 
         self.client = chromadb.PersistentClient(
             path=str(self.persist_directory),
@@ -44,7 +59,8 @@ class VectorStoreManager:
         pcap_id: str,
         delete_existing: bool = False
     ) -> Collection:
-        collection_name = f"pcap_{pcap_id}"
+        method_suffix = "hf" if self.embedding_method == "huggingface" else "ollama"
+        collection_name = f"pcap_{pcap_id}_{method_suffix}"
 
         if delete_existing:
             try:
@@ -65,6 +81,7 @@ class VectorStoreManager:
                 name=collection_name,
                 metadata={
                     "pcap_id": pcap_id,
+                    "embedding_method": self.embedding_method,
                     "embedding_model": self.embedding_model,
                     "created_at": datetime.utcnow().isoformat(),
                     "hnsw:space": "cosine",
