@@ -659,51 +659,85 @@ class ChatHandler:
 Just ask your question naturally, and I'll search through the network traffic and threat intelligence data to provide you with specific answers."""
 
     def _expand_query(self, query: str, classification: Dict[str, Any]) -> str:
+        import re
         query_lower = query.lower()
 
         expansions = []
 
-        # Forensic keyword expansions (NEW - for Layer 2-7 data)
+        # Extract IP address if present in query for targeted expansion
+        ip_match = re.search(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', query)
+        extracted_ip = ip_match.group(0) if ip_match else None
+
+        # Enhanced forensic keyword expansions with protocol hints
         if 'mac address' in query_lower or 'hardware address' in query_lower or 'physical address' in query_lower:
-            expansions.append('MAC address hardware address physical address Ethernet address layer2 address ARP ether')
+            expansions.append('MAC address hardware address physical address Ethernet address layer2 address ARP ether NIC address')
+            expansions.append('ARP table layer 2 Ethernet')  # Protocol hint
+            if extracted_ip:
+                expansions.append(f'ARP {extracted_ip} MAC of {extracted_ip}')
 
-        if 'hostname' in query_lower or 'computer name' in query_lower or 'machine name' in query_lower:
-            expansions.append('hostname computer name machine name workstation name NetBIOS name DHCP hostname device name')
+        if 'hostname' in query_lower or 'computer name' in query_lower or 'machine name' in query_lower or 'host name' in query_lower:
+            expansions.append('hostname computer name machine name workstation name NetBIOS name DHCP hostname device name FQDN')
+            expansions.append('DHCP Option 12 NetBIOS NBNS SMB')  # Protocol hints
+            if extracted_ip:
+                expansions.append(f'hostname of {extracted_ip} DHCP NetBIOS for {extracted_ip}')
 
-        if 'user account' in query_lower or 'username' in query_lower or 'user' in query_lower:
-            expansions.append('user account username user principal UPN account name Kerberos SMB authenticated user logged in user')
+        if 'user account' in query_lower or 'username' in query_lower or 'user' in query_lower or 'logged in' in query_lower:
+            expansions.append('user account username user principal UPN account name authenticated user logged in user active user')
+            expansions.append('Kerberos SMB authentication')  # Protocol hints
+            if extracted_ip:
+                expansions.append(f'user on {extracted_ip} Kerberos SMB user for {extracted_ip}')
 
-        if 'domain' in query_lower and 'subdomain' not in query_lower:
-            expansions.append('domain realm Kerberos realm Active Directory AD domain Windows domain DNS domain workgroup LDAP')
+        if ('domain' in query_lower and 'subdomain' not in query_lower) or 'workgroup' in query_lower or 'realm' in query_lower:
+            expansions.append('domain realm Kerberos realm Active Directory AD domain Windows domain workgroup LDAP')
+            expansions.append('DHCP Option 15 Kerberos SMB domain')  # Protocol hints
 
-        if 'os' in query_lower or 'operating system' in query_lower or 'windows' in query_lower:
-            expansions.append('operating system OS Windows version build number native OS SMB platform system')
+        if 'os' in query_lower or 'operating system' in query_lower or 'windows' in query_lower or 'system' in query_lower:
+            expansions.append('operating system OS Windows version build number native OS SMB platform system information')
+            expansions.append('SMB native_os DHCP vendor class')  # Protocol hints
 
-        if 'infected' in query_lower or 'compromised' in query_lower or 'victim' in query_lower:
-            expansions.append('infected compromised victim malicious activity threat detected attack target patient zero')
+        if 'infected' in query_lower or 'compromised' in query_lower or 'victim' in query_lower or 'malware' in query_lower:
+            expansions.append('infected compromised victim malicious activity threat detected attack target patient zero malware')
+            expansions.append('infected host compromised system Windows client')
 
-        if 'infection' in query_lower and 'start' in query_lower:
-            expansions.append('infection start infection time attack start initial compromise first malicious activity timeline')
+        if 'infection' in query_lower and ('start' in query_lower or 'time' in query_lower or 'when' in query_lower):
+            expansions.append('infection start infection time attack start initial compromise first malicious activity timeline first seen')
+
+        # Detect queries about specific IP attributes
+        if extracted_ip and any(term in query_lower for term in ['what is', 'find', 'tell me', 'show me']):
+            # User asking about a specific IP's attributes
+            if 'hostname' in query_lower or 'name' in query_lower:
+                expansions.append(f'hostname computer name for IP {extracted_ip}')
+            if 'mac' in query_lower:
+                expansions.append(f'MAC hardware address for IP {extracted_ip}')
+            if 'user' in query_lower:
+                expansions.append(f'user account username for IP {extracted_ip}')
 
         # Existing expansions
-        if 'file_analysis' in classification['topics']:
+        if 'file_analysis' in classification.get('topics', []):
             expansions.append('file transfer download upload HTTP')
 
-        if 'domain_analysis' in classification['topics']:
+        if 'domain_analysis' in classification.get('topics', []):
             expansions.append('DNS domain hostname')
 
-        if 'ip_analysis' in classification['topics']:
+        if 'ip_analysis' in classification.get('topics', []):
             expansions.append('IP address connection')
 
-        if classification['is_threat_focused']:
+        if classification.get('is_threat_focused'):
             expansions.append('malicious threat VirusTotal security')
 
         if 'hash' in query_lower:
             expansions.append('SHA256 MD5 file hash checksum')
 
+        # Detect common forensic questions and add targeted expansions
+        if any(phrase in query_lower for phrase in ['infected client', 'compromised host', 'infected host', 'windows client', 'victim computer']):
+            expansions.append('infected client compromised host victim Windows client infected system forensic investigation')
+
         if expansions:
             expanded = f"{query} {' '.join(expansions)}"
-            print(f"Query expanded with context: {expansions}")
+            print(f"[Query Expansion] Original: {query}")
+            print(f"[Query Expansion] Added keywords: {expansions[:3]}")  # Show first 3 for brevity
+            if extracted_ip:
+                print(f"[Query Expansion] Detected IP: {extracted_ip}")
             return expanded
 
         return query
@@ -780,6 +814,111 @@ Just ask your question naturally, and I'll search through the network traffic an
                 'message': 'I couldn\'t find specific information to answer your question. Try asking about overall threats, statistics, or rephrasing your query.'
             }
 
+    def _resolve_entity_references(self, query: str, session_memory: Dict[str, Any]) -> str:
+        """Resolve entity references like 'this IP', 'the client' to actual values."""
+        import re
+
+        if not session_memory.get('exchanges'):
+            return query
+
+        last_exchange = session_memory['exchanges'][-1]
+        last_entities = last_exchange.get('entities', {})
+
+        resolved = query
+
+        # Resolve IP references
+        if any(ref in query.lower() for ref in ['this ip', 'that ip', 'the ip']):
+            if last_entities.get('ips'):
+                ip = last_entities['ips'][-1]
+                resolved = re.sub(r'\bthis ip\b', ip, resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthat ip\b', ip, resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthe ip\b', ip, resolved, flags=re.IGNORECASE)
+
+        # Resolve client/host references when we know which IP is the infected one
+        if any(ref in query.lower() for ref in ['this client', 'that client', 'the client', 'this host', 'that host', 'the host', 'infected client', 'compromised host', 'the infected', 'the compromised']):
+            if last_entities.get('ips'):
+                ip = last_entities['ips'][-1]
+                # Inject the IP into the query for better RAG matching
+                resolved = re.sub(r'\bthis client\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthat client\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthe client\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthis host\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthat host\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthe host\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\binfected client\b', f'infected client IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bcompromised host\b', f'compromised host IP {ip}', resolved, flags=re.IGNORECASE)
+
+        # Resolve domain references
+        if any(ref in query.lower() for ref in ['this domain', 'that domain', 'the domain']):
+            if last_entities.get('domains'):
+                domain = last_entities['domains'][-1]
+                resolved = re.sub(r'\bthis domain\b', domain, resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthat domain\b', domain, resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthe domain\b', domain, resolved, flags=re.IGNORECASE)
+
+        return resolved
+
+    def _extract_entities_from_history(self, chat_history: List[Dict[str, str]]) -> Dict[str, List[str]]:
+        """Extract entities (IPs, domains) from chat history for Option 2."""
+        import re
+
+        entities = {'ips': [], 'domains': []}
+
+        for exchange in chat_history[-3:]:  # Look at last 3 exchanges
+            user_msg = exchange.get('user', '')
+            assistant_msg = exchange.get('assistant', '')
+
+            # Extract IPs from both user and assistant messages
+            ips = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', user_msg + ' ' + assistant_msg)
+            for ip in ips:
+                if ip not in entities['ips']:
+                    entities['ips'].append(ip)
+
+            # Extract domains (basic pattern)
+            domains = re.findall(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b', user_msg + ' ' + assistant_msg)
+            for domain in domains:
+                if domain not in entities['domains'] and not re.match(r'^\d+\.\d+\.\d+\.\d+$', domain):
+                    entities['domains'].append(domain)
+
+        return entities
+
+    def _resolve_entity_references_from_history(self, query: str, chat_history: List[Dict[str, str]], entities: Dict[str, List[str]]) -> str:
+        """Resolve entity references for Option 2 using chat history."""
+        import re
+
+        resolved = query
+
+        # Resolve IP references
+        if any(ref in query.lower() for ref in ['this ip', 'that ip', 'the ip']):
+            if entities.get('ips'):
+                ip = entities['ips'][-1]
+                resolved = re.sub(r'\bthis ip\b', ip, resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthat ip\b', ip, resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthe ip\b', ip, resolved, flags=re.IGNORECASE)
+
+        # Resolve client/host references
+        if any(ref in query.lower() for ref in ['this client', 'that client', 'the client', 'this host', 'that host', 'the host', 'infected client', 'compromised host']):
+            if entities.get('ips'):
+                ip = entities['ips'][-1]
+                resolved = re.sub(r'\bthis client\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthat client\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthe client\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthis host\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthat host\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthe host\b', f'IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\binfected client\b', f'infected client IP {ip}', resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bcompromised host\b', f'compromised host IP {ip}', resolved, flags=re.IGNORECASE)
+
+        # Resolve domain references
+        if any(ref in query.lower() for ref in ['this domain', 'that domain', 'the domain']):
+            if entities.get('domains'):
+                domain = entities['domains'][-1]
+                resolved = re.sub(r'\bthis domain\b', domain, resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthat domain\b', domain, resolved, flags=re.IGNORECASE)
+                resolved = re.sub(r'\bthe domain\b', domain, resolved, flags=re.IGNORECASE)
+
+        return resolved
+
     def _is_short_followup(self, query: str) -> bool:
         query_lower = query.lower().strip()
         short_followups = [
@@ -798,18 +937,24 @@ Just ask your question naturally, and I'll search through the network traffic an
         return False
 
     def _enrich_query_with_session_memory(self, query: str, session_memory: Dict[str, Any]) -> str:
-        """Enrich query with session memory context for better follow-up handling."""
+        """Enrich query with session memory context and resolve entity references."""
+        import re
+
         if not session_memory['exchanges']:
             return query
 
         if not self._is_short_followup(query):
-            return query
+            # Even if not a short follow-up, still resolve entity references
+            return self._resolve_entity_references(query, session_memory)
 
         last_exchange = session_memory['exchanges'][-1]
         last_user_query = last_exchange.get('user', '')
         last_mentioned_entities = last_exchange.get('entities', {})
 
         query_lower = query.lower().strip()
+
+        # First, resolve entity references in the query
+        resolved_query = self._resolve_entity_references(query, session_memory)
 
         if query_lower in ['yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay']:
             enriched = f"""[CONVERSATION CONTEXT: User previously asked: "{last_user_query}". User now says "{query}" - they want MORE DETAILS about that topic.]
@@ -823,12 +968,14 @@ Provide more detailed information about: {last_user_query}"""
 Continue with more details about: {last_user_query}"""
             return enriched
 
-        elif any(ref in query_lower for ref in ['this ip', 'that ip', 'the ip']):
+        elif any(ref in query_lower for ref in ['this ip', 'that ip', 'the ip', 'this client', 'that client', 'the client', 'this host', 'that host', 'the host', 'infected client', 'compromised host']):
             if last_mentioned_entities.get('ips'):
                 ip = last_mentioned_entities['ips'][-1]
-                enriched = f"""[CONVERSATION CONTEXT: User is referring to IP {ip} from previous discussion.]
+                # Return the resolved query which has the actual IP substituted
+                print(f"[Session Memory] Resolved entity reference: '{query}' -> '{resolved_query}'")
+                enriched = f"""[CONVERSATION CONTEXT: User is referring to IP {ip} from previous discussion about infected host.]
 
-User's question about IP {ip}: {query}"""
+User's question about IP {ip}: {resolved_query}"""
                 return enriched
 
         elif any(ref in query_lower for ref in ['this domain', 'that domain', 'the domain']):
@@ -836,8 +983,15 @@ User's question about IP {ip}: {query}"""
                 domain = last_mentioned_entities['domains'][-1]
                 enriched = f"""[CONVERSATION CONTEXT: User is referring to domain {domain} from previous discussion.]
 
-User's question about domain {domain}: {query}"""
+User's question about domain {domain}: {resolved_query}"""
                 return enriched
+
+        # If resolved_query differs from original, use it
+        if resolved_query != query:
+            print(f"[Session Memory] Resolved entity reference: '{query}' -> '{resolved_query}'")
+            return f"""[CONVERSATION CONTEXT: Previous question was: "{last_user_query}"]
+
+Current follow-up: {resolved_query}"""
 
         return f"""[CONVERSATION CONTEXT: Previous question was: "{last_user_query}"]
 
@@ -984,17 +1138,27 @@ Current follow-up: {query}"""
         return events
 
     def _enrich_query_with_context(self, query: str, chat_history: List[Dict[str, str]]) -> str:
+        """Enrich query with chat history context and resolve entity references (Option 2)."""
+        import re
+
         if not chat_history or len(chat_history) == 0:
             return query
 
+        # Extract entities from chat history
+        entities = self._extract_entities_from_history(chat_history)
+
         if not self._is_short_followup(query):
-            return query
+            # Even if not a short follow-up, still resolve entity references
+            return self._resolve_entity_references_from_history(query, chat_history, entities)
 
         last_exchange = chat_history[-1]
         last_user_query = last_exchange.get('user', '')
         last_assistant_response = last_exchange.get('assistant', '')
 
         query_lower = query.lower().strip()
+
+        # First, resolve entity references in the query
+        resolved_query = self._resolve_entity_references_from_history(query, chat_history, entities)
 
         if query_lower in ['yes', 'yeah', 'yep', 'yup', 'sure', 'ok', 'okay']:
             enriched = f"""[CONTEXT MEMORY: The user previously asked: "{last_user_query}"
@@ -1020,8 +1184,22 @@ The user now says "{query}" - they want additional details or continuation of th
 User's current request: Continue with more details about {last_user_query}"""
             return enriched
 
-        else:
-            enriched = f"""[CONTEXT MEMORY: The user previously asked: "{last_user_query}"]
+        elif any(ref in query_lower for ref in ['this ip', 'that ip', 'the ip', 'this client', 'that client', 'the client', 'this host', 'that host', 'the host']):
+            if entities.get('ips'):
+                ip = entities['ips'][-1]
+                print(f"[Session Memory - Option 2] Resolved entity reference: '{query}' -> '{resolved_query}'")
+                enriched = f"""[CONTEXT MEMORY: User is referring to IP {ip} from previous discussion.]
+
+User's question about IP {ip}: {resolved_query}"""
+                return enriched
+
+        # If resolved_query differs from original, use it
+        if resolved_query != query:
+            print(f"[Session Memory - Option 2] Resolved entity reference: '{query}' -> '{resolved_query}'")
+            return f"""[CONTEXT MEMORY: The user previously asked: "{last_user_query}"]
+
+User's current follow-up question: {resolved_query}"""
+
+        return f"""[CONTEXT MEMORY: The user previously asked: "{last_user_query}"]
 
 User's current follow-up question: {query}"""
-            return enriched

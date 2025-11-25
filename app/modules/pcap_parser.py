@@ -1240,7 +1240,8 @@ class PCAPParser:
     def _aggregate_forensic_metadata(self, all_packets: List[Dict], forensic_trackers: Dict, stats: Dict, vt_results: Any = None) -> Dict[str, Any]:
         """Aggregate forensic metadata from all collected tracking data."""
         forensic_analysis = {
-            'hosts': {},
+            'infected_hosts': [],  # NEW: Consolidated infected host data for easy RAG retrieval
+            'hosts': {},  # All hosts detailed data
             'arp_table': {},
             'mac_vendor_lookup': {},
             'network_topology': {
@@ -1517,7 +1518,104 @@ class PCAPParser:
         # Sort final timeline
         forensic_analysis['infection_timeline'].sort(key=lambda x: x['timestamp'] if x['timestamp'] else '')
 
+        # Build consolidated infected_hosts list for easy RAG retrieval
+        infected_hosts_list = []
+        for ip, host in forensic_analysis['hosts'].items():
+            if host['is_infected']:
+                # Create consolidated infected host entry with single values (not arrays)
+                infected_host = {
+                    'ip': ip,
+                    'mac': host['mac_addresses'][0] if host['mac_addresses'] else 'Unknown',
+                    'hostname': host['hostnames'][0] if host['hostnames'] else 'Unknown',
+                    'computer_name': host['hostnames'][0] if host['hostnames'] else 'Unknown',  # Synonym for RAG
+                    'user_account': host['user_accounts'][0] if host['user_accounts'] else 'Unknown',
+                    'domain': host['domains'][0] if host['domains'] else 'Unknown',
+                    'os_info': host['os_versions'][0] if host['os_versions'] else 'Unknown',
+                    'netbios_names': host['netbios_names'][:3] if host['netbios_names'] else [],  # Keep up to 3
+                    'first_seen': host['first_seen'] or 'Unknown',
+                    'last_seen': host['last_seen'] or 'Unknown',
+                    'total_packets': host['total_packets'],
+                    'is_infected': True,
+                    'infection_confidence': 'high' if len(host['malicious_connections']) >= 3 else 'medium' if len(host['malicious_connections']) >= 1 else 'low',
+                    'malicious_connections_count': len(host['malicious_connections']),
+                    'malicious_connections': host['malicious_connections'][:5],  # First 5 connections
+                    'data_sources': self._build_data_sources_map(host, forensic_trackers, ip)
+                }
+
+                # Add all known hostnames and users for completeness
+                infected_host['all_hostnames'] = host['hostnames'][:5] if len(host['hostnames']) > 1 else []
+                infected_host['all_users'] = host['user_accounts'][:5] if len(host['user_accounts']) > 1 else []
+                infected_host['all_macs'] = host['mac_addresses'][:5] if len(host['mac_addresses']) > 1 else []
+
+                infected_hosts_list.append(infected_host)
+
+        # Sort by infection confidence and connection count
+        infected_hosts_list.sort(key=lambda x: (x['infection_confidence'] == 'high', x['malicious_connections_count']), reverse=True)
+        forensic_analysis['infected_hosts'] = infected_hosts_list
+
+        print(f"[Forensic Analysis] Identified {len(infected_hosts_list)} infected hosts")
+        for infected in infected_hosts_list:
+            print(f"  - {infected['ip']} (hostname: {infected['hostname']}, MAC: {infected['mac']}, confidence: {infected['infection_confidence']})")
+
         return forensic_analysis
+
+    def _build_data_sources_map(self, host_profile: Dict[str, Any], forensic_trackers: Dict, ip: str) -> Dict[str, str]:
+        """Build a map of where each piece of forensic data came from."""
+        sources = {}
+
+        # Track MAC address source
+        if host_profile['mac_addresses']:
+            if ip in forensic_trackers.get('arp_table', {}):
+                sources['mac'] = 'ARP table'
+            elif ip in forensic_trackers.get('dhcp_info', {}):
+                sources['mac'] = 'DHCP'
+            else:
+                sources['mac'] = 'Ethernet layer'
+
+        # Track hostname source
+        if host_profile['hostnames']:
+            hostname = host_profile['hostnames'][0]
+            if ip in forensic_trackers.get('dhcp_info', {}) and forensic_trackers['dhcp_info'][ip].get('hostname') == hostname:
+                sources['hostname'] = 'DHCP Option 12'
+            elif ip in forensic_trackers.get('netbios_names', {}):
+                sources['hostname'] = 'NetBIOS/NBNS'
+            else:
+                sources['hostname'] = 'SMB'
+
+        # Track user account source
+        if host_profile['user_accounts']:
+            user = host_profile['user_accounts'][0]
+            # Check if from Kerberos
+            from_kerberos = False
+            for kerb_user, kerb_info in forensic_trackers.get('kerberos_users', {}).items():
+                if kerb_info.get('source_ip') == ip and kerb_user.startswith(user.split('@')[0]):
+                    sources['user_account'] = 'Kerberos authentication'
+                    from_kerberos = True
+                    break
+            if not from_kerberos:
+                sources['user_account'] = 'SMB session'
+
+        # Track domain source
+        if host_profile['domains']:
+            domain = host_profile['domains'][0]
+            if ip in forensic_trackers.get('dhcp_info', {}) and forensic_trackers['dhcp_info'][ip].get('domain') == domain:
+                sources['domain'] = 'DHCP Option 15'
+            else:
+                # Check Kerberos
+                from_kerberos = False
+                for kerb_user, kerb_info in forensic_trackers.get('kerberos_users', {}).items():
+                    if kerb_info.get('source_ip') == ip and kerb_info.get('realm') == domain:
+                        sources['domain'] = 'Kerberos realm'
+                        from_kerberos = True
+                        break
+                if not from_kerberos:
+                    sources['domain'] = 'SMB domain'
+
+        # Track OS info source
+        if host_profile['os_versions']:
+            sources['os_info'] = 'SMB native_os' if ip in forensic_trackers.get('smb_sessions', {}) else 'DHCP Vendor Class'
+
+        return sources
 
     def get_unique_entities(self) -> Tuple[List[str], List[str]]:
         stats = self.extract_basic_stats()
